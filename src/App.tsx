@@ -1,12 +1,17 @@
 import { useEffect, useState } from 'react'
+import { HashRouter, Route, Routes } from 'react-router-dom'
+import { Layout } from './app/Layout'
 import { authApi } from './features/auth/api'
 import { CreateVaultScreen } from './features/auth/CreateVaultScreen'
 import { RecoverAccessScreen } from './features/auth/RecoverAccessScreen'
 import { RecoveryCodeScreen } from './features/auth/RecoveryCodeScreen'
 import type { VaultStatus } from './features/auth/types'
 import { UnlockScreen } from './features/auth/UnlockScreen'
-import { UnlockedPlaceholder } from './features/auth/UnlockedPlaceholder'
 import { useRecordActivity } from './features/auth/useRecordActivity'
+import { PatientCreateScreen } from './features/patients/PatientCreateScreen'
+import { PatientDetailScreen } from './features/patients/PatientDetailScreen'
+import { PatientEditScreen } from './features/patients/PatientEditScreen'
+import { PatientsListScreen } from './features/patients/PatientsListScreen'
 
 type Screen =
   | { kind: 'loading' }
@@ -85,7 +90,18 @@ function App() {
         />
       )
     case 'unlocked':
-      return <UnlockedPlaceholder onLocked={() => setScreen({ kind: 'unlock' })} />
+      return (
+        <HashRouter>
+          <Routes>
+            <Route element={<Layout onLocked={() => setScreen({ kind: 'unlock' })} />}>
+              <Route path="/" element={<PatientsListScreen />} />
+              <Route path="/patients/new" element={<PatientCreateScreen />} />
+              <Route path="/patients/:id" element={<PatientDetailScreen />} />
+              <Route path="/patients/:id/edit" element={<PatientEditScreen />} />
+            </Route>
+          </Routes>
+        </HashRouter>
+      )
   }
 }
 

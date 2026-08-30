@@ -40,10 +40,6 @@ impl AutoLockTracker {
 }
 
 struct UnlockedSession {
-    // Todavía no hay ningún comando Tauri de datos clínicos que la lea
-    // (llega en la Fase 1.5); por ahora solo la usan los tests de
-    // `with_connection` de este mismo archivo.
-    #[allow(dead_code)]
     conn: Connection,
     /// Se retiene mientras la app está desbloqueada (no solo durante el
     /// `PRAGMA key` inicial) porque es lo que hay que zeroizar al bloquear
@@ -106,9 +102,6 @@ impl std::error::Error for ConfirmCreationError {}
 /// disponible. Es el único error posible de `VaultSession::with_connection`,
 /// y existe precisamente para que sea estructuralmente imposible tocar la
 /// base de datos sin pasar por un desbloqueo real primero.
-// Sin uso en producción todavía (llega con los primeros comandos de datos
-// clínicos en la Fase 1.5); lo ejercitan los tests de este archivo.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct VaultLockedError;
 impl fmt::Display for VaultLockedError {
@@ -273,9 +266,6 @@ impl VaultSession {
     /// `Err(VaultLockedError)` — no hay ninguna otra vía para llegar a la
     /// conexión, así que es estructuralmente imposible leer datos clínicos
     /// mientras la app está bloqueada.
-    // Sin comando Tauri todavía (llega con el primer repositorio de datos
-    // clínicos en la Fase 1.5); lo ejercitan los tests de este archivo.
-    #[allow(dead_code)]
     pub fn with_connection<T>(&self, f: impl FnOnce(&Connection) -> T) -> Result<T, VaultLockedError> {
         let state = self.state.lock().unwrap();
         match &*state {
@@ -367,6 +357,125 @@ mod tests {
             conn.query_row::<i64, _, _>("SELECT count(*) FROM patients", [], |r| r.get(0))
         });
         assert!(matches!(result, Err(VaultLockedError)));
+    }
+
+    #[test]
+    fn patient_operations_are_rejected_at_the_backend_while_locked() {
+        use crate::services::patients::{self, PatientInput};
+
+        fn blank_input(name: &str) -> PatientInput {
+            PatientInput {
+                full_name: name.to_string(),
+                preferred_name: None,
+                rut: None,
+                birth_date: None,
+                phone: None,
+                email: None,
+                address: None,
+                emergency_contact_name: None,
+                emergency_contact_phone: None,
+                emergency_contact_relationship: None,
+                status: None,
+                referred_by: None,
+                intake_date: None,
+            }
+        }
+
+        let dir = temp_vault_dir("patient-ops-rejected-while-locked");
+        let session = VaultSession::new(&dir);
+        session.begin_creation("ContrasenaSegura2026!").unwrap();
+        session.confirm_creation().unwrap();
+
+        // Con el vault desbloqueado, crear un paciente funciona y persiste.
+        let created_id = session
+            .with_connection(|conn| patients::create_patient(conn, blank_input("Ana Pérez")))
+            .unwrap()
+            .unwrap()
+            .id;
+
+        session.lock();
+
+        // Bloqueado: ninguna operación de pacientes puede ni siquiera
+        // intentarse, porque no hay forma de obtener una `&Connection`.
+        let create_result =
+            session.with_connection(|conn| patients::create_patient(conn, blank_input("Bruno Soto")));
+        assert!(matches!(create_result, Err(VaultLockedError)));
+
+        let list_result = session.with_connection(|conn| patients::list_patients(conn, None));
+        assert!(matches!(list_result, Err(VaultLockedError)));
+
+        let get_result = session.with_connection(|conn| patients::get_patient(conn, &created_id));
+        assert!(matches!(get_result, Err(VaultLockedError)));
+
+        let update_result =
+            session.with_connection(|conn| patients::update_patient(conn, &created_id, blank_input("Otro Nombre")));
+        assert!(matches!(update_result, Err(VaultLockedError)));
+
+        let archive_result = session.with_connection(|conn| patients::archive_patient(conn, &created_id));
+        assert!(matches!(archive_result, Err(VaultLockedError)));
+
+        // Y al desbloquear de nuevo, el paciente sigue exactamente como
+        // se dejó (no se perdió ni se corrompió nada durante el bloqueo).
+        session.unlock("ContrasenaSegura2026!").unwrap();
+        let still_there = session
+            .with_connection(|conn| patients::get_patient(conn, &created_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_there.full_name, "Ana Pérez");
+    }
+
+    /// Simula el ciclo completo pedido en el criterio de terminado de la
+    /// Fase 1.5: crear vault → crear paciente → "cerrar la app" (soltar
+    /// `VaultSession`, lo que cierra la conexión) → "reabrir la app" (una
+    /// `VaultSession` nueva sobre el mismo directorio) → desbloquear →
+    /// encontrar el paciente exactamente como quedó.
+    #[test]
+    fn patient_survives_a_full_close_and_reopen_of_the_app() {
+        use crate::services::patients::{self, PatientInput};
+
+        let dir = temp_vault_dir("patient-survives-close-reopen");
+        let patient_id;
+        {
+            let session = VaultSession::new(&dir);
+            session.begin_creation("ContrasenaSegura2026!").unwrap();
+            session.confirm_creation().unwrap();
+
+            let input = PatientInput {
+                full_name: "Constanza Rivas".to_string(),
+                preferred_name: Some("Coni".to_string()),
+                rut: Some("12.345.678-5".to_string()),
+                birth_date: Some("1990-05-12".to_string()),
+                phone: None,
+                email: None,
+                address: None,
+                emergency_contact_name: None,
+                emergency_contact_phone: None,
+                emergency_contact_relationship: None,
+                status: None,
+                referred_by: None,
+                intake_date: None,
+            };
+            patient_id = session
+                .with_connection(|conn| patients::create_patient(conn, input))
+                .unwrap()
+                .unwrap()
+                .id;
+        } // `session` se suelta aquí: simula cerrar la aplicación.
+
+        // "Reabrir la aplicación": una VaultSession completamente nueva
+        // apuntando al mismo directorio, que no hereda nada en memoria de
+        // la anterior.
+        let reopened = VaultSession::new(&dir);
+        assert_eq!(reopened.status(), VaultStatus::Locked);
+        reopened.unlock("ContrasenaSegura2026!").unwrap();
+
+        let found = reopened
+            .with_connection(|conn| patients::get_patient(conn, &patient_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.full_name, "Constanza Rivas");
+        assert_eq!(found.preferred_name.as_deref(), Some("Coni"));
+        assert_eq!(found.rut.as_deref(), Some("12345678-5"));
     }
 
     #[test]

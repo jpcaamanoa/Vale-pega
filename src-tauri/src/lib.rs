@@ -1,6 +1,8 @@
 mod commands;
 mod db;
+mod repositories;
 mod security;
+mod services;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +61,12 @@ pub fn run() {
       commands::lock_vault,
       commands::record_vault_activity,
       commands::set_auto_lock_timeout_seconds,
+      commands::create_patient,
+      commands::get_patient,
+      commands::list_patients,
+      commands::update_patient,
+      commands::archive_patient,
+      commands::restore_patient,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
