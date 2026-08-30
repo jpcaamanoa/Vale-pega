@@ -235,17 +235,30 @@ CREATE TABLE session_notes (
   homework_tasks TEXT,
   next_focus TEXT,
   version INTEGER NOT NULL DEFAULT 1,
-  is_locked INTEGER NOT NULL DEFAULT 0,   -- 0/1; nota "cerrada" -> editar crea nueva versión
+  is_locked INTEGER NOT NULL DEFAULT 0,    -- 0 = borrador editable (autoguardado), 1 = cerrada (inmutable)
+  is_current INTEGER NOT NULL DEFAULT 1,   -- 1 = versión vigente de la nota de esta sesión
+  closed_at TEXT,
+  superseded_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX idx_session_notes_session ON session_notes(session_id);
+-- Garantiza a nivel de base de datos que solo puede existir una versión vigente por sesión.
+CREATE UNIQUE INDEX idx_session_notes_current ON session_notes(session_id) WHERE is_current = 1;
 ```
 
-> **Nota de práctica clínica (pendiente de decisión, no impuesta):** se dejan `is_locked` +
-> `version` para poder, más adelante, tratar una nota "cerrada" como inmutable (editar crea una
-> versión nueva en vez de sobrescribir), que es buena práctica de registro clínico. En el MVP
-> puede comportarse como edición simple; se activa cuando se decida — ver sección 12.
+> **Confirmado (Fase 1 MVP): versionado activo desde el inicio.** Ciclo de vida de una nota:
+> **Borrador → Cerrada**.
+> - En borrador (`is_locked = 0`): se edita en el mismo registro, con autoguardado.
+> - Al cerrar (`is_locked = 1`, `closed_at` = ahora): la fila queda protegida en la capa de
+>   servicio contra escritura — no se sobrescribe silenciosamente.
+> - Al modificar una nota cerrada: el servicio Rust **inserta una fila nueva**
+>   (`version = version_anterior + 1`, `is_locked = 0`, `is_current = 1`, precargada con el
+>   contenido de la versión anterior como punto de partida) y marca la fila anterior
+>   `is_current = 0`, `superseded_at = ahora`. Ninguna versión se pierde; el historial completo
+>   se consulta con `SELECT * FROM session_notes WHERE session_id = ? ORDER BY version`.
+> - El índice único parcial `idx_session_notes_current` hace que sea la base de datos, no solo
+>   la aplicación, la que impide tener dos versiones "vigentes" simultáneas por sesión.
 
 ### Formulación
 
@@ -706,26 +719,130 @@ Las Fases 2–8 mantienen el alcance definido originalmente; no se replanifican 
 
 ---
 
-## 12. Riesgos y decisiones pendientes
+## 12. Decisiones confirmadas (30 de agosto de 2026)
 
-1. **Separación de base de datos**: se recomienda una sola base SQLCipher con tablas
-   físicamente separadas y frontera dura en Rust (no dos archivos). Pendiente de confirmación.
-2. **Biometría**: se propone diferir Touch ID/Windows Hello a Fase 7 y partir con contraseña +
-   código de recuperación (+ keychain atado a la sesión del SO como conveniencia). Pendiente de
-   confirmación.
-3. **Sincronización Google Calendar**: se propone unidireccional (app → Google) para el MVP de
-   Fase 3. Pendiente de confirmación.
-4. **Google OAuth**: la usuaria debe crear el proyecto y las credenciales en Google Cloud
-   Console cuando se llegue a Fase 3.
-5. **Inmutabilidad de notas de sesión**: se dejó `is_locked`/`version` en el esquema pero sin
-   activar el comportamiento real. Pendiente de decidir si se activa desde el MVP.
-6. **Backup automático por defecto**: pendiente definir frecuencia y carpeta destino sugeridas.
-7. **Chequeo de FileVault/BitLocker**: posible verificación del cifrado de disco del SO como
-   defensa en profundidad. Pendiente de decidir si se agrega en Fase 7.
-8. **Librerías Rust a fijar en `Cargo.toml`**: `rusqlite` (bundled-sqlcipher-vendored-openssl),
-   `rusqlite_migration`, `argon2`, `aes-gcm`, `aes-kw`, `zeroize`, `keyring`, `reqwest`,
-   `serde`/`serde_json`, y para exportación a PDF `genpdf` o `printpdf`. Pendiente de
-   confirmación.
-9. **Aceptación explícita**: si se pierde la contraseña maestra y el código de recuperación
-   simultáneamente, los datos son irrecuperables por diseño (no hay puerta trasera). Pendiente
-   de confirmación.
+Revisión completa de la Fase 1 aprobada. Estado de cada punto:
+
+1. **Separación de base de datos — confirmado.** Una sola base SQLCipher. Separación lógica y
+   física mediante tablas dedicadas (`patient_clinical_profile` separada de `patients`, etc.) y
+   frontera dura en el código Rust (servicios administrativos que no importan los servicios
+   clínicos). No se crean dos bases de datos.
+2. **Biometría — diferida a Fase 7, confirmado.** MVP con contraseña maestra + código de
+   recuperación + bloqueo automático real. El keychain/Credential Manager del SO se usa
+   **solo como conveniencia cuando sea apropiado y seguro** (ver regla explícita abajo) —
+   nunca implica dejar la base de datos permanentemente desbloqueada. Bloquear la app siempre
+   cierra la conexión cifrada y exige autenticación real para reabrirla; "recordar sesión" no
+   puede degradar esa garantía.
+3. **Sincronización Google Calendar — unidireccional confirmada.** Cuaderno Clínico → Google
+   Calendar únicamente, en ambos sentidos de la Fase 3. La aplicación local es siempre la fuente
+   de verdad; un cambio o eliminación hecho directamente en Google Calendar **nunca** modifica o
+   elimina una cita o información clínica local — a lo sumo, la próxima sincronización marca esa
+   cita como "sin vínculo con Google" para revisión manual (ver sección 6).
+4. **Google OAuth — confirmado.** La usuaria creará las credenciales (proyecto, Calendar API,
+   Client ID) en Google Cloud Console al llegar a la Fase 3. No se inventan ni simulan Client
+   ID, Client Secret ni tokens en ningún momento.
+5. **Notas de sesión — versionado activo desde el MVP, confirmado.** Ciclo
+   **Borrador → Cerrada** con autoguardado en borrador, inmutabilidad real al cerrar, nueva
+   versión (no sobrescritura) al modificar una nota cerrada, e historial de versiones
+   consultable. Esquema y comportamiento detallados en la sección 4 (tabla `session_notes`).
+6. **Backup automático — confirmado, configurable.** Activado por defecto, frecuencia diaria,
+   ejecutado en un momento seguro (al cerrar la app) sin interferir con el uso. Requisitos de
+   producto para la Fase 7 (backup): botón de backup manual; selector de carpeta de destino;
+   fecha del último backup exitoso visible; advertencia si ha pasado demasiado tiempo sin
+   backup exitoso; verificación de integridad (sección 9); nunca sobrescribir silenciosamente el
+   único backup existente; **rotación de backups automáticos, conservando los últimos 7**.
+7. **FileVault/BitLocker — confirmado, se agrega a Fase 7.** Chequeo del estado de cifrado de
+   disco del sistema operativo, mostrado como recomendación si está desactivado. Es
+   exclusivamente informativo: **nunca bloquea el uso de la aplicación**.
+8. **Librerías Rust — dirección aceptada, con verificación de compatibilidad antes de fijar
+   versiones.** Antes de agregar cada dependencia a `Cargo.toml` en la fase que la necesite
+   (`rusqlite`+SQLCipher en 1.2, `rusqlite_migration` en 1.3, `argon2`/`aes-gcm`/`aes-kw`/
+   `zeroize`/`keyring` en 1.4, `reqwest` en Fase 3, etc.) se valida que compila y funciona junto
+   al resto del árbol de dependencias ya presente, no solo que "debería funcionar" en teoría. Se
+   mantiene el número de dependencias al mínimo necesario; si alguna presenta problemas de
+   mantenimiento, compatibilidad o seguridad al momento de agregarla, se reporta y se propone
+   una alternativa antes de incorporarla — nunca se agrega "porque podría servir".
+9. **Pérdida de contraseña y código de recuperación — aceptado explícitamente.** Sin ningún otro
+   mecanismo legítimo de recuperación disponible, los datos son irrecuperables por diseño. No
+   habrá puerta trasera.
+
+---
+
+## 13. Reglas adicionales de producto (incorporadas el 30 de agosto de 2026)
+
+### A. Minimización de exposición de datos dentro de la propia aplicación
+
+Aunque todo esté cifrado en reposo, se aplica mínima exposición también en tiempo de uso:
+
+- No mostrar el RUT completo en listados cuando no sea necesario (ej. mostrar solo los últimos
+  dígitos u ocultarlo tras un clic).
+- No mostrar información clínica sensible (diagnóstico, contenido de notas) en el dashboard.
+- Los títulos de ventana del sistema operativo nunca incluyen diagnóstico ni datos clínicos
+  (el título de la ventana Tauri es fijo: "Cuaderno Clínico").
+- Ninguna notificación del sistema operativo incluye información clínica ni nombre de paciente
+  en el cuerpo visible (a lo sumo, un texto genérico tipo "Tienes una sesión en 15 minutos").
+- Los logs de la aplicación nunca incluyen nombres de pacientes ni contenido clínico —
+  únicamente identificadores técnicos (UUID) y eventos (ver threat model, punto 6).
+- Los nombres de archivo en el sistema operativo nunca incluyen nombres de pacientes (ver
+  sección 7 — nombres `<uuid>.enc`).
+- Google Calendar nunca recibe información identificable (ver sección 6).
+- La búsqueda global (sección 8) devuelve solo el contexto mínimo para identificar un resultado
+  (tipo + título + fragmento corto), nunca el contenido completo de una nota o evaluación.
+
+Esta regla se aplica de forma transversal a cada feature que se construya desde la Fase 2 en
+adelante; se revisa explícitamente en cada nueva pantalla que muestre datos de un paciente.
+
+### B. Dashboard
+
+Al abrir la aplicación (Fase 2), pantalla de inicio con tres bloques, sin sobrecargarla:
+
+- **Hoy**: sesiones del día con hora, paciente y estado.
+- **Pendientes**: sesiones sin nota cerrada, pagos pendientes, tareas clínicas registradas,
+  documentos pendientes cuando corresponda.
+- **Resumen**: pacientes activos, sesiones del mes, ingresos del mes.
+
+### C. Ficha de paciente como centro del sistema
+
+La ficha de un paciente es el punto de acceso rápido a: resumen, antecedentes, sesiones, notas,
+formulación, objetivos, evaluaciones, documentos, pagos y línea temporal. Se diseña (Fase 2) como
+un layout con navegación lateral/tabs dentro de la ficha, no como pantallas aisladas sin relación
+entre sí.
+
+### D. Creación de sesión — rápida, sin generación automática de contenido clínico
+
+Flujo objetivo: **Nueva sesión → seleccionar paciente → fecha/hora → abrir nota**, con el mínimo
+de clics. La aplicación puede recordar y sugerir automáticamente: la estructura de nota usada
+anteriormente con ese paciente, los objetivos terapéuticos activos, e información relevante para
+continuar la sesión — todo como **ayuda de organización**, nunca generando contenido clínico por
+sí misma (esto también es coherente con la regla F: no IA generativa).
+
+### E. Modo privacidad (arquitectura preparada, implementación no necesariamente en el MVP)
+
+Un modo de interfaz que, al activarse, minimiza la información identificable visible en pantalla
+(útil al compartir pantalla): oculta RUT, oculta datos de contacto, y opcionalmente muestra
+iniciales en vez de nombres completos en listados. Se deja preparado como una preferencia global
+de UI (`app_settings`, ej. `privacy_mode: boolean`) que los componentes de listado consultan al
+renderizar — así activarlo/desactivarlo es una bandera transversal y no requiere tocar cada
+pantalla si se implementa después del MVP.
+
+### F. Sin IA generativa por ahora
+
+Ninguna nota clínica, documento, evaluación ni información de paciente se envía a un modelo de
+IA externo ni local en esta versión. Si en el futuro se evalúa IA local, será un proyecto
+separado y explícitamente autorizado — no se incorpora por defecto ni de forma incremental sin
+esa autorización.
+
+---
+
+## 14. Estado de avance
+
+| Fase | Estado | Verificado |
+|---|---|---|
+| **1.1** — Scaffold Tauri + React + TS + Tailwind | ✅ Completada | `cargo check`, `cargo test`, `cargo clippy`, `npm run build`, `npm run lint` en verde; build release (`tauri build --no-bundle`) enlaza correctamente; app ejecutada bajo Xvfb con captura de pantalla confirmando que la ventana renderiza y el comando Rust `app_info` responde por IPC |
+| 1.2 — SQLite + SQLCipher | Pendiente | — |
+| 1.3 — Migraciones y esquema | Pendiente | — |
+| 1.4 — Seguridad (Argon2id, envelope encryption) | Pendiente | — |
+| 1.5 — Vertical Pacientes (repositories/services/commands) | Pendiente | — |
+| 1.6 — Cliente IPC + Zod + Zustand | Pendiente | — |
+| 1.7 — Shell de UI y pantalla de bloqueo | Pendiente | — |
+| 1.8 — Suite de pruebas y validación cruzada | Pendiente | — |
