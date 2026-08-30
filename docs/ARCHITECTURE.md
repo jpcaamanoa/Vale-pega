@@ -839,7 +839,7 @@ esa autorización.
 | Fase | Estado | Verificado |
 |---|---|---|
 | **1.1** — Scaffold Tauri + React + TS + Tailwind | ✅ Completada | `cargo check`, `cargo test`, `cargo clippy`, `npm run build`, `npm run lint` en verde; build release (`tauri build --no-bundle`) enlaza correctamente; app ejecutada bajo Xvfb con captura de pantalla confirmando que la ventana renderiza y el comando Rust `app_info` responde por IPC |
-| 1.2 — SQLite + SQLCipher | Pendiente | — |
+| **1.2** — SQLite + SQLCipher | ✅ Completada | `rusqlite` 0.40.2 + `libsqlite3-sys` 0.38.2 (SQLCipher 4.14.0, SQLite 3.51.3) con `bundled-sqlcipher-vendored-openssl` (OpenSSL 3.6.3 vendorizado); 11/11 tests en verde cubriendo creación, cierre/reapertura, rechazo de clave incorrecta, rechazo de archivo corrupto, verificación de `PRAGMA cipher_version`, e inspección de bytes en disco confirmando ausencia del encabezado plano de SQLite. Detalle completo en `docs/sqlcipher.md` |
 | 1.3 — Migraciones y esquema | Pendiente | — |
 | 1.4 — Seguridad (Argon2id, envelope encryption) | Pendiente | — |
 | 1.5 — Vertical Pacientes (repositories/services/commands) | Pendiente | — |
