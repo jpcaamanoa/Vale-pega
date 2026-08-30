@@ -840,7 +840,7 @@ esa autorización.
 |---|---|---|
 | **1.1** — Scaffold Tauri + React + TS + Tailwind | ✅ Completada | `cargo check`, `cargo test`, `cargo clippy`, `npm run build`, `npm run lint` en verde; build release (`tauri build --no-bundle`) enlaza correctamente; app ejecutada bajo Xvfb con captura de pantalla confirmando que la ventana renderiza y el comando Rust `app_info` responde por IPC |
 | **1.2** — SQLite + SQLCipher | ✅ Completada | `rusqlite` 0.40.2 + `libsqlite3-sys` 0.38.2 (SQLCipher 4.14.0, SQLite 3.51.3) con `bundled-sqlcipher-vendored-openssl` (OpenSSL 3.6.3 vendorizado); 11/11 tests en verde cubriendo creación, cierre/reapertura, rechazo de clave incorrecta, rechazo de archivo corrupto, verificación de `PRAGMA cipher_version`, e inspección de bytes en disco confirmando ausencia del encabezado plano de SQLite. Detalle completo en `docs/sqlcipher.md` |
-| 1.3 — Migraciones y esquema | Pendiente | — |
+| **1.3** — Migraciones y esquema completo | ✅ Completada | `rusqlite_migration` 2.6.0 (una sola migración V1 con las 25 tablas); 29/29 tests en verde (11 de la 1.2 + 18 nuevos) cubriendo creación desde cero, foreign keys, índices/CHECK, un caso de datos relacionados de punta a punta en todos los dominios, rechazo de estados inválidos, verificación de que el esquema funciona sobre SQLCipher y no sobre SQLite plano, y que reaplicar o agregar migraciones no destruye datos existentes. Detalle completo, diferencias respecto al esquema original y decisiones pendientes en `docs/db-schema.md` |
 | 1.4 — Seguridad (Argon2id, envelope encryption) | Pendiente | — |
 | 1.5 — Vertical Pacientes (repositories/services/commands) | Pendiente | — |
 | 1.6 — Cliente IPC + Zod + Zustand | Pendiente | — |

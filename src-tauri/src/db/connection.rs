@@ -178,31 +178,22 @@ pub fn open_vault(path: &Path, key: &VaultKey) -> Result<Connection, VaultError>
     })
     .map_err(|_| VaultError::WrongKeyOrCorrupt)?;
 
+    // SQLite exige activar la verificación de foreign keys en cada conexión
+    // por separado (no es un ajuste persistente de la base). `run_migrations`
+    // la desactiva temporalmente mientras migra y la reactiva al terminar,
+    // pero cualquier conexión obtenida de `open_vault` la tiene ON por
+    // defecto, se ejecuten migraciones a continuación o no.
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
     Ok(conn)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::test_support::{key, temp_db_path};
     use std::fs;
     use std::io::Write;
-
-    fn temp_db_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cuaderno-clinico-test-{}-{}",
-            std::process::id(),
-            name
-        ));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir.join("vault.db")
-    }
-
-    fn key(byte: u8) -> VaultKey {
-        VaultKey::new([byte; VAULT_KEY_LEN])
-    }
 
     #[test]
     fn debug_never_prints_the_key_bytes() {

@@ -8,5 +8,9 @@
 #![allow(unused_imports)]
 
 mod connection;
+mod migrations;
+#[cfg(test)]
+mod test_support;
 
 pub use connection::{open_vault, VaultError, VaultKey, VaultKeyError, VAULT_KEY_LEN};
+pub use migrations::{migrations, run_migrations};
