@@ -23,11 +23,6 @@
 //!   `V3`, etc., nunca modificando este texto una vez publicado (ver test
 //!   `applying_a_new_migration_preserves_existing_data`).
 
-// Fase 1.3: igual que connection.rs, todavía no hay un comando Tauri que
-// dispare esto en el arranque real de la app (llega en la Fase 1.4, cuando
-// exista el flujo de desbloqueo). Hasta entonces solo lo ejercitan los tests.
-#![allow(dead_code)]
-
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 

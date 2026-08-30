@@ -23,12 +23,6 @@
 //!   indistinguibles para el driver — no se puede prometer más precisión que
 //!   esa, y no lo intentamos.
 
-// Fase 1.2: este módulo todavía no está conectado a ningún comando Tauri (eso
-// llega en las Fases 1.4/1.5, cuando exista un flujo real de "crear/desbloquear
-// vault"). Hasta entonces solo lo ejercitan los tests de abajo, así que el
-// compilador vería `dead_code` en el build normal si no se silencia aquí.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::path::Path;
 
@@ -86,6 +80,14 @@ impl VaultKey {
 
     fn as_hex(&self) -> String {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Acceso a los bytes crudos, solo para el resto del crate. Lo usa
+    /// exclusivamente `security::envelope` para envolver/desenvolver el DEK
+    /// con AES-256-GCM (Fase 1.4) — nunca se expone fuera de Rust (ni a
+    /// comandos Tauri, ni a logs).
+    pub(crate) fn expose_secret(&self) -> &[u8; VAULT_KEY_LEN] {
+        &self.0
     }
 }
 
