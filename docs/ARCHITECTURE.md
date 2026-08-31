@@ -102,6 +102,14 @@ su cuenta) y generar un Client ID tipo "Desktop app". Toda la arquitectura queda
 loopback redirect, almacenamiento seguro de tokens) pero esas credenciales no pueden generarse
 ni simularse externamente.
 
+**f) Elección de Tauri y compatibilidad con el objetivo futuro de multiplataforma (agregado el 31
+de agosto de 2026).** La elección de Tauri en esta sección no fue solo por postura de seguridad:
+Tauri también soporta objetivos móviles (iOS/iPadOS vía `tauri-mobile`) sobre el mismo core en
+Rust, lo que hace que el objetivo futuro de extender la app a iPhone/iPad (ver sección 15) sea
+compatible con la arquitectura ya elegida, sin requerir un cambio de framework más adelante. Esto
+no implica trabajo alguno de Fase 1 ni adelanta esa fase — es simplemente la constatación de que
+la decisión tomada en 1.1 no bloquea esa dirección futura.
+
 ---
 
 ## 3. Estructura de carpetas
@@ -825,6 +833,12 @@ de UI (`app_settings`, ej. `privacy_mode: boolean`) que los componentes de lista
 renderizar — así activarlo/desactivarlo es una bandera transversal y no requiere tocar cada
 pantalla si se implementa después del MVP.
 
+Esta regla es un caso particular de un principio más amplio de **privacidad visual**: la
+aplicación debe minimizar por diseño lo que es visible de reojo o en una captura de pantalla, no
+solo lo que queda en reposo cifrado. La sección 14 (identidad visual y sistema de diseño) recoge
+este principio como parte de las reglas de UX transversales, y la sección 16 lo consolida junto
+con el resto de los principios de privacidad no negociables.
+
 ### F. Sin IA generativa por ahora
 
 Ninguna nota clínica, documento, evaluación ni información de paciente se envía a un modelo de
@@ -834,7 +848,209 @@ esa autorización.
 
 ---
 
-## 14. Estado de avance
+## 14. Identidad visual y sistema de diseño (incorporado el 31 de agosto de 2026)
+
+### A. Principio: fuente única de verdad para lo visual
+
+Todo valor visual (colores, espaciado, tipografía, radios, sombras) se define **una sola vez**
+como *design tokens* (variables — CSS custom properties o el `theme` de Tailwind extendido) y los
+componentes consumen esos tokens por nombre semántico (`bg-surface`, `text-accent`,
+`border-default`), nunca un color de la paleta por defecto de Tailwind escrito directamente
+(`bg-slate-900`, `text-red-600`, `bg-emerald-500`, etc.) ni un valor hexadecimal suelto dentro de
+un componente. La razón no es estética: si el color de marca, el contraste de accesibilidad o un
+futuro tema oscuro cambian, el cambio debe hacerse en un solo lugar y propagarse solo, en vez de
+perseguir cada clase escrita a mano en cada componente.
+
+- **Color de acento**: `#2D5128` (verde oscuro). Se define como token (`--color-accent` /
+  `accent` en el tema de Tailwind) y se usa para elementos de marca, estados activos/seleccionados
+  y llamados a la acción primarios — no como color de fondo masivo.
+- **Categorías de tokens necesarias** (a definir en detalle en la Fase 1.7, "tema", según el plan
+  de la sección 11): color (fondo, superficie, borde, texto primario/secundario, acento, estados
+  semánticos éxito/advertencia/error), espaciado, radios, escala tipográfica, sombras.
+- **Preparación para modo oscuro**: los tokens se estructuran para que un futuro tema oscuro sea
+  un *reemplazo de valores de los mismos tokens*, no una reescritura de componentes. No implica
+  implementar modo oscuro ahora, solo no cerrar esa puerta con nombres de clase hardcodeados.
+
+### B. Principios de UX
+
+Consistentes con las reglas de producto ya aprobadas (sección 13, especialmente 13.C y 13.D):
+
+- **Claridad sobre decoración**: sin animaciones, transiciones o elementos visuales que no
+  aporten a entender o hacer algo más rápido.
+- **Comodidad en uso prolongado**: la aplicación se usa varias horas seguidas en un día clínico
+  (sección tras sección); tipografía legible, espaciado generoso, sin fatiga visual por contraste
+  excesivo o densidad innecesaria.
+- **Profesional y sobrio**: paleta reducida, sin colores saturados fuera del acento y los estados
+  semánticos.
+- **Consistencia entre pantallas**: el mismo componente se ve y se comporta igual en toda la app
+  — otra razón para que los tokens sean centrales y no por-componente.
+
+### C. Privacidad visual
+
+Ver sección 13.E (Modo privacidad) y la ampliación de ese principio en la sección 16. La
+identidad visual y la privacidad visual comparten mecanismo: ambas dependen de que el estado
+"qué se muestra en pantalla" sea gobernable de forma centralizada (tokens de diseño +
+`privacy_mode` en `app_settings`), no decisiones sueltas repetidas en cada pantalla.
+
+### D. Afecta la arquitectura actual — y contradicción detectada
+
+Esto **sí afecta el frontend ya implementado**, aunque no toca Rust, la base de datos ni el
+módulo de seguridad. Se deja constancia explícita, tal como se pidió, sin corregirlo en este
+paso:
+
+> **Contradicción detectada (no corregida en este documento):** los componentes de React
+> construidos en las Fases 1.1–1.5 (`src/components/ui/*`, `src/features/auth/*`,
+> `src/features/patients/*`, `src/app/Layout.tsx`, `src/App.tsx`) usan clases de la paleta por
+> defecto de Tailwind escritas directamente componente por componente (`bg-slate-900`,
+> `bg-slate-50`, `text-red-600`, `bg-emerald-500`, etc.), sin una capa de tokens centralizada ni
+> el color de acento `#2D5128`. Esto contradice el principio A de esta sección. **No se modifica
+> ningún componente en este documento ni en este turno** — el plan de implementación (sección 11)
+> ya reserva la Fase 1.7 ("Shell de UI: routing, layout, **tema**, pantalla de bloqueo/desbloqueo")
+> para introducir la capa de tokens; ese es el momento natural para migrar los componentes
+> existentes a los tokens, en vez de hacerlo ad hoc ahora. Se reporta como pendiente técnico
+> explícito, no como bug bloqueante.
+
+---
+
+## 15. Objetivo de multiplataforma y arquitectura de sincronización futura (incorporado el 31 de agosto de 2026 — fuera de alcance de Fase 1)
+
+Todo lo descrito en esta sección es un **objetivo de producto a futuro**, documentado ahora para
+que las decisiones de Fase 1 no lo bloqueen accidentalmente. **Nada de esta sección se
+implementa en Fase 1, ni siquiera parcialmente.** No hay backend, no hay nube, no hay sync, no
+hay build de iOS/iPadOS, no hay E2EE multi-dispositivo — todo eso queda para cuando se apruebe
+explícitamente una fase futura dedicada.
+
+### A. Multiplataforma
+
+- **Hoy**: macOS y Windows, ambos de primera clase (ver sección 2, fila "Framework de
+  escritorio", y el ítem f agregado a "Cuestionamientos importantes"). **Windows no es un
+  soporte secundario de un producto pensado para Apple** — cualquier decisión de diseño o de
+  almacenamiento debe funcionar igual de bien en ambos sistemas operativos.
+- **Futuro**: extender a iPhone/iPad. Tauri ya soporta objetivos móviles sobre el mismo core en
+  Rust, por lo que esta meta es compatible con la arquitectura elegida en 1.1 sin requerir
+  reescribirla.
+- **Un dispositivo Apple no implica iCloud.** Tener build en iOS/iPadOS no significa que la
+  sincronización (ver punto B) use iCloud por defecto, ni que se acople a servicios exclusivos de
+  Apple de forma que Windows quede en desventaja. Cualquier mecanismo de sincronización futuro
+  debe diseñarse para funcionar igual entre macOS, Windows, iOS/iPadOS — nunca como "Apple
+  primero, Windows si alcanza".
+
+### B. Sincronización entre dispositivos (futura, no diseñada en detalle todavía)
+
+Mandato de diseño, no diseño cerrado: **cualquier sincronización futura debe ser local-first y
+end-to-end encrypted (E2EE)**, de forma que ningún servidor, relay o proveedor de nube
+intermedio — sea propio o de terceros (iCloud, Google Drive, un relay propio, etc.) — pueda leer
+el contenido clínico en tránsito ni en reposo del lado del servidor. El servidor, si existe, es
+en el mejor de los casos un intermediario ciego de bytes cifrados.
+
+Antes de implementar sincronización en cualquier forma, deben responderse explícitamente (no se
+responden en este documento, quedan como lista de preguntas abiertas para cuando se apruebe esa
+fase):
+
+1. ¿Qué transporte se usa? (relay propio mínimo, servicio de terceros ya cifrado en tránsito, o
+   sincronización de archivo crudo vía un proveedor de almacenamiento que la usuaria ya controle).
+2. ¿Cómo se emparejan dispositivos nuevos sin exponer el DEK ni las contraseñas en el proceso?
+3. ¿Cómo se comparte o deriva la clave entre dispositivos autorizados sin debilitar la seguridad
+   de un solo dispositivo (ver sección 5)?
+4. ¿Qué pasa con el rendimiento y el costo de almacenamiento si se sincroniza también el vault de
+   documentos, no solo la base estructurada?
+5. ¿Cómo se comporta la app sin conexión (local-first implica que la ausencia de red nunca
+   bloquea el trabajo clínico normal)?
+
+### C. Dispositivos autorizados y revocación (concepto futuro, no diseñado en detalle)
+
+Se reserva conceptualmente la idea de una lista de "dispositivos autorizados" por vault, con la
+capacidad de **revocar** el acceso de un dispositivo específico (por ejemplo, si se pierde o se
+vende). Consistente con el patrón de envelope encryption ya implementado en la sección 5 (cada
+KEK envuelve el mismo DEK independientemente): un diseño futuro razonable es que cada dispositivo
+autorizado tenga su propia envoltura del DEK, de modo que revocar un dispositivo sea invalidar
+solo su envoltura — sin tener que rotar contraseñas de otros dispositivos. Esto es una dirección
+de diseño compatible con lo ya construido, no una decisión tomada; el diseño concreto se define
+cuando se aborde esa fase.
+
+### D. Resolución de conflictos — prohibición explícita de "last-write-wins" silencioso
+
+Ninguna sincronización futura puede resolver un conflicto sobre una nota clínica sobrescribiendo
+silenciosamente una versión con otra ("el último que sincronizó gana"). Esto ya es compatible con
+lo implementado: las notas de sesión (sección 4, tabla `session_notes`) son append-only por
+versión desde la Fase 1.4/1.5 (`version`, `is_current`, `superseded_at`) precisamente porque
+nunca se sobrescribe una versión — se crea una nueva y se preserva el historial completo. Un
+futuro mecanismo de sincronización debe extender ese mismo principio entre dispositivos: ante un
+conflicto real, ambas versiones se preservan y la usuaria decide, o el conflicto se expone
+explícitamente en la UI para revisión manual — nunca una resolución automática invisible.
+
+### E. Backup, Sync y Export — tres sistemas conceptualmente distintos
+
+La sección 9 ya distingue Backup y Exportación con propósitos distintos; se agrega Sync como un
+tercer sistema, y se deja explícito que **los tres nunca se combinan ni se confunden entre sí**,
+ni en el diseño ni en la interfaz:
+
+| Sistema | Propósito | Alcance | Estado |
+|---|---|---|---|
+| **Backup** | Recuperar el propio vault ante pérdida/corrupción/error | Un solo vault, restaurado en el mismo dispositivo o uno de reemplazo | Implementado conceptualmente en la sección 9, pendiente de construir en Fase 7 |
+| **Sync** | Mantener el mismo vault consistente entre varios dispositivos autorizados de la misma usuaria | Múltiples dispositivos, mismo vault lógico, E2EE | Futuro, fuera de alcance de Fase 1, ver puntos B–D |
+| **Export** | Extraer datos deliberadamente en texto plano para uso fuera de la app (otro sistema, otro profesional, un trámite) | Un subconjunto de datos, ya no protegido por esta arquitectura | Implementado conceptualmente en la sección 9 |
+
+### F. Explícitamente fuera de alcance de esta actualización y de la Fase 1 actual
+
+No se escribe código nuevo, no se implementa sincronización, no se implementa backend/nube, no se
+implementa build de iOS/iPadOS, no se implementa E2EE multi-dispositivo, y no se agrega ninguna
+dependencia nueva a `Cargo.toml` ni a `package.json` en función de nada de esta sección. Nada de
+lo anterior avanza la Fase 1.6.
+
+**Verificación de compatibilidad con lo ya implementado (Fases 1.1–1.5):** no se encontró
+contradicción entre este objetivo futuro y la arquitectura actual. Tauri (1.1), el vault único
+SQLCipher con envelope encryption (1.2/1.4) y el versionado append-only de notas (1.3) son, de
+hecho, una base de partida favorable para B, C y D respectivamente, sin haber sido diseñados
+pensando en sync — es una coincidencia útil, no una casualidad forzada.
+
+---
+
+## 16. Principios de privacidad no negociables (consolidado el 31 de agosto de 2026)
+
+Esta sección consolida en un solo lugar los principios de privacidad que ya estaban dispersos
+(secciones 5, 6, 9, 13.A, 13.E) junto con los agregados en esta actualización, para que existan
+como una lista única citable en vez de un criterio implícito repetido de memoria en cada
+decisión futura:
+
+1. Ningún dato clínico sale del dispositivo sin cifrado de extremo a extremo bajo control de la
+   propia aplicación (ver sección 5; extendido a cualquier sincronización futura en la sección
+   15.B).
+2. Ningún proveedor de sincronización, backup en la nube o infraestructura intermedia puede leer
+   contenido clínico — ni siquiera el proveedor de la infraestructura (iCloud, Google, un relay
+   propio, etc.).
+3. No existe puerta trasera, ni maestra ni de soporte técnico, para acceder a un vault sin la
+   contraseña o el código de recuperación de la usuaria (ver sección 5, punto 8).
+4. Los dispositivos Apple no implican sincronización vía iCloud por defecto — es una decisión
+   explícita, nunca una consecuencia automática de la plataforma (ver sección 15.A).
+5. Windows es un ciudadano de primera clase de esta aplicación, no un soporte secundario respecto
+   de macOS/iOS (ver sección 2 y 15.A).
+6. Ninguna notificación del sistema operativo expone contenido clínico ni un nombre de paciente
+   identificable en el cuerpo visible, en ninguna plataforma. Ejemplo permitido: *"Tienes una
+   sesión en 15 minutos."* Ejemplo prohibido: *"Sesión con Juan Pérez sobre ideación suicida en 15
+   minutos."* (Regla ya establecida en 13.A; se reafirma aquí como no negociable y válida también
+   para cualquier notificación futura relacionada con sincronización, ej. "Sync completado" sí,
+   "3 notas de Juan Pérez sincronizadas" no).
+7. Ninguna resolución de conflicto sobre datos clínicos es automática o silenciosa
+   ("last-write-wins"); la usuaria siempre puede ver y decidir (ver sección 15.D).
+8. Backup, Sync y Export son sistemas distintos con propósitos distintos y nunca se combinan ni
+   se presentan como intercambiables en la implementación ni en la interfaz (ver sección 15.E).
+9. Cualquier tecnología, dependencia o cambio de arquitectura que toque estos nueve principios
+   requiere detenerse y pedir aprobación explícita antes de implementarse — coherente con la regla
+   de proceso ya vigente desde el inicio del proyecto para cualquier decisión de arquitectura.
+
+Estos principios no reemplazan el threat model de la sección 10; lo complementan desde el ángulo
+de producto/privacidad en vez del ángulo de amenaza técnica.
+
+---
+
+## 17. Estado de avance
+
+> **Nota (31 de agosto de 2026):** actualización solo de documentación — se integraron a este
+> documento las secciones 14, 15 y 16 (identidad visual/tokens, objetivo de multiplataforma y
+> sincronización futura, y principios de privacidad no negociables). No hubo cambios de código,
+> no se agregaron dependencias y no se avanzó a la Fase 1.6; el estado de las fases sigue siendo
+> el de la tabla de abajo.
 
 | Fase | Estado | Verificado |
 |---|---|---|
