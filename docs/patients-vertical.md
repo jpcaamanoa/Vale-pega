@@ -193,9 +193,9 @@ de pantalla en cada paso, siguiendo exactamente el criterio de terminado:
 
 ## Limitaciones y decisiones que necesito que apruebes
 
-1. **Sin papelera visual.** `restore_patient` existe y funciona (backend +
-   test), pero no hay pantalla para ver/restaurar pacientes archivados
-   todavía — tal como autorizaste explícitamente para esta fase.
+1. ~~Sin papelera visual.~~ **Resuelto en la Fase 1.6** — ver sección
+   "Fase 1.6" al final de este documento: ahora existe la pestaña
+   "Archivados" con restauración real desde la interfaz.
 2. **Búsqueda solo por nombre/nombre preferido, no por RUT.** Se decidió
    así para no tener que resolver si buscar por RUT cuenta como "mostrarlo"
    en algún sentido. Si prefieres poder buscar por RUT (aunque no se
@@ -217,3 +217,93 @@ de pantalla en cada paso, siguiendo exactamente el criterio de terminado:
    forma transitiva (vía Tauri) en la misma versión, así que no se agregó
    peso real al binario — se hizo explícita porque ahora el código de la
    aplicación la usa directamente para generar IDs de pacientes.
+
+---
+
+## Fase 1.6 — papelera de pacientes archivados (31 de agosto de 2026)
+
+La Fase 1.5 dejó el ciclo completo de pacientes funcional pero sin una
+pantalla para ver o restaurar pacientes archivados (limitación 1 de más
+arriba, explícitamente aprobada para esa fase). La Fase 1.6, autorizada
+bajo las reglas permanentes del proyecto descritas en `CLAUDE.md`, cierra
+ese punto **exponiendo una capacidad que ya existía en el backend**
+(`restore_patient`, con tests, desde la Fase 1.5) — no se inventó una
+política nueva de eliminación/recuperación, solo se construyó la vista que
+faltaba.
+
+### Qué se agregó
+
+| Capa | Cambio |
+|---|---|
+| `repositories::patients` | `list_deleted(conn, search)` — mismo filtro de búsqueda que `list_active`, pero sobre `deleted_at IS NOT NULL`, ordenado por fecha de eliminación (más reciente primero). |
+| `services::patients` | `list_archived_patients(conn, search)` — capa de negocio equivalente a `list_patients`, nunca mezclada con ella. |
+| `commands::patients` | Nuevo comando Tauri `list_archived_patients`, registrado en `src-tauri/src/lib.rs`. |
+| `src/features/patients/api.ts` | `patientsApi.listArchived(search)`. |
+| `PatientsListScreen.tsx` | Pestañas "Activos" / "Archivados"; cada una consulta su propio comando. Se agregó también un indicador de carga visible (antes el estado `loading` existía pero no se mostraba en pantalla). |
+| `PatientDetailScreen.tsx` | Si `patient.deletedAt` no es null: banner explicando que el paciente está archivado, botón "Editar" oculto (coherente con que `update_patient` ya rechazaba escribir sobre un paciente eliminado), y botón "Restaurar" con diálogo de confirmación que llama a `patientsApi.restore`. |
+
+No se tocó el esquema de base de datos — `deleted_at` ya existía desde la
+Fase 1.3, y `restore_patient` (repositorio, servicio y comando) ya existía
+desde la Fase 1.5. Fase 1.6 es exclusivamente una vista nueva sobre datos y
+operaciones ya existentes.
+
+### Tests nuevos
+
+Agregados a `services::patients::tests` (Rust, contra SQLCipher real, no
+contra mocks):
+
+- `archived_list_shows_only_soft_deleted_patients_and_hides_active_ones`
+- `restoring_a_patient_removes_it_from_the_archived_list`
+- `searches_archived_patients_by_name`
+
+Suite completa: **114/114 tests en verde** (111 de la Fase 1.5 sin
+modificaciones + 3 nuevos).
+
+### Verificación manual (aplicación real, no solo tests)
+
+Compilada con `npx tauri build --no-bundle --debug`, ejecutada bajo Xvfb
+con interacción real de mouse/teclado (`xdotool`), capturas de pantalla en
+cada paso:
+
+1. Crear vault nuevo → confirmar código de recuperación → app desbloqueada.
+2. Crear paciente ficticio ("Paciente de Prueba Uno") desde el formulario
+   real → ficha muestra los datos persistidos.
+3. Archivar el paciente (con diálogo de confirmación) → desaparece de
+   "Activos".
+4. Pestaña "Archivados" → el paciente aparece ahí, con los mismos datos.
+5. Abrir su ficha desde la vista de archivados → banner de "paciente
+   archivado" visible, botón "Editar" ausente, botón "Restaurar" presente.
+6. Restaurar (con diálogo de confirmación) → banner desaparece, botones
+   "Editar"/"Archivar" vuelven, paciente otra vez en "Activos".
+7. **Cierre completo del proceso** de la aplicación (no solo bloquear) y
+   **reapertura real** del binario.
+8. La app arranca en estado `Locked` (vault persistido en disco).
+9. Desbloquear con la misma contraseña → el paciente restaurado sigue
+   activo — persistencia real en SQLCipher confirmada fuera de un test
+   automatizado, incluyendo el ciclo completo archivar→restaurar.
+
+Nota sobre el entorno de pruebas: ya existía en este sandbox un
+`vault`/`vault.meta.json` de verificaciones manuales de la Fase 1.5, cuya
+contraseña no estaba registrada en ningún documento (correctamente, según
+la regla de que la contraseña nunca se almacena). Para esta verificación
+se movió esa carpeta a un nombre de respaldo
+(`com.jpcaamano.cuadernoclinico.fase1.5-manual-test-backup`, no se borró)
+y se dejó que la aplicación creara un vault nuevo — coherente con la regla
+de no destruir estado existente sin necesidad. Todos los datos usados en
+esta verificación son ficticios, según la regla 3 de `CLAUDE.md`.
+
+### Regresión confirmada
+
+`cargo test` (114/114), `cargo clippy --all-targets` (sin advertencias),
+`npm run build` (sin errores de tipos), `npm run lint` (mismas 5
+advertencias preexistentes de Fases 1.4/1.5, ninguna nueva introducida por
+este cambio).
+
+### Decisiones que no requirieron aprobación previa
+
+Ninguna de las reglas de "detenerse" de `CLAUDE.md` (sección 11) se activó
+en esta fase: no hubo cambio de arquitectura, de modelo de seguridad, de
+modelo de base de datos, dependencias nuevas, envío de información fuera
+del dispositivo, ni modificación de una decisión previamente aprobada —
+`list_deleted`/`list_archived_patients` son una consulta adicional sobre el
+mismo esquema y las mismas capas ya existentes.

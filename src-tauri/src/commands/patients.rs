@@ -48,6 +48,20 @@ pub fn list_patients(
         .map_err(|e| e.to_string())
 }
 
+/// Papelera: pacientes con soft delete aplicado. Separado de `list_patients`
+/// a propósito — nunca se mezclan activos y archivados en la misma
+/// respuesta.
+#[tauri::command]
+pub fn list_archived_patients(
+    search: Option<String>,
+    state: State<'_, SharedVaultSession>,
+) -> Result<Vec<PatientListItem>, String> {
+    state
+        .with_connection(|conn| patients::list_archived_patients(conn, search))
+        .map_err(|_| LOCKED_MESSAGE.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn update_patient(
     id: String,

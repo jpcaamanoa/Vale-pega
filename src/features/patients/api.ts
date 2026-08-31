@@ -8,6 +8,9 @@ export const patientsApi = {
 
   list: (search?: string) => invoke<PatientListItem[]>('list_patients', { search: search || null }),
 
+  listArchived: (search?: string) =>
+    invoke<PatientListItem[]>('list_archived_patients', { search: search || null }),
+
   update: (id: string, input: PatientInput) => invoke<Patient>('update_patient', { id, input }),
 
   archive: (id: string) => invoke<void>('archive_patient', { id }),

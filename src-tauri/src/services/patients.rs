@@ -241,6 +241,16 @@ pub fn list_patients(conn: &Connection, search: Option<String>) -> Result<Vec<Pa
     Ok(rows.into_iter().map(PatientListItem::from).collect())
 }
 
+/// Vista de "archivados": pacientes con soft delete aplicado, para la
+/// papelera desde la que se pueden revisar y restaurar. Nunca se mezcla con
+/// `list_patients` (que solo devuelve pacientes activos) — son dos
+/// consultas explícitamente separadas, igual que en el repositorio.
+pub fn list_archived_patients(conn: &Connection, search: Option<String>) -> Result<Vec<PatientListItem>, PatientError> {
+    let search = search.filter(|s| !s.trim().is_empty());
+    let rows = patients::list_deleted(conn, search.as_deref())?;
+    Ok(rows.into_iter().map(PatientListItem::from).collect())
+}
+
 pub fn update_patient(conn: &Connection, id: &str, input: PatientInput) -> Result<Patient, PatientError> {
     let f = validate(input)?;
     let row = PatientUpdateRow {
@@ -468,5 +478,47 @@ mod tests {
         let conn = test_conn("archive-not-found");
         let err = archive_patient(&conn, "no-existe").unwrap_err();
         assert!(matches!(err, PatientError::NotFound));
+    }
+
+    #[test]
+    fn archived_list_shows_only_soft_deleted_patients_and_hides_active_ones() {
+        let conn = test_conn("archived-list");
+        let active = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        let archived = create_patient(&conn, minimal_input("Bruno Soto")).unwrap();
+        archive_patient(&conn, &archived.id).unwrap();
+
+        let archived_list = list_archived_patients(&conn, None).unwrap();
+        assert_eq!(archived_list.len(), 1);
+        assert_eq!(archived_list[0].id, archived.id);
+        assert!(!archived_list.iter().any(|p| p.id == active.id));
+
+        let active_list = list_patients(&conn, None).unwrap();
+        assert!(active_list.iter().any(|p| p.id == active.id));
+        assert!(!active_list.iter().any(|p| p.id == archived.id));
+    }
+
+    #[test]
+    fn restoring_a_patient_removes_it_from_the_archived_list() {
+        let conn = test_conn("archived-list-restore");
+        let created = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        archive_patient(&conn, &created.id).unwrap();
+        assert_eq!(list_archived_patients(&conn, None).unwrap().len(), 1);
+
+        restore_patient(&conn, &created.id).unwrap();
+
+        assert!(list_archived_patients(&conn, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn searches_archived_patients_by_name() {
+        let conn = test_conn("archived-search");
+        let ana = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        let bruno = create_patient(&conn, minimal_input("Bruno Soto")).unwrap();
+        archive_patient(&conn, &ana.id).unwrap();
+        archive_patient(&conn, &bruno.id).unwrap();
+
+        let results = list_archived_patients(&conn, Some("ana".to_string())).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].full_name, "Ana Pérez");
     }
 }

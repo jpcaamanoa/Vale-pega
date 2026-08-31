@@ -173,6 +173,35 @@ pub fn list_active(conn: &Connection, search: Option<&str>) -> rusqlite::Result<
     rows.collect()
 }
 
+/// Pacientes eliminados (soft delete), para la vista de "archivados". Mismo
+/// filtro de búsqueda que `list_active`, pero sobre `deleted_at IS NOT NULL`
+/// y ordenados por fecha de eliminación más reciente primero — es una
+/// papelera, no un listado alfabético de trabajo diario.
+pub fn list_deleted(conn: &Connection, search: Option<&str>) -> rusqlite::Result<Vec<PatientSummary>> {
+    let mut stmt;
+    let rows = match search {
+        Some(term) => {
+            stmt = conn.prepare(
+                "SELECT id, full_name, preferred_name, status, intake_date FROM patients
+                 WHERE deleted_at IS NOT NULL
+                   AND (full_name LIKE ?1 ESCAPE '\\' OR preferred_name LIKE ?1 ESCAPE '\\')
+                 ORDER BY deleted_at DESC",
+            )?;
+            let pattern = format!("%{}%", escape_like(term));
+            stmt.query_map(params![pattern], map_summary_row)?
+        }
+        None => {
+            stmt = conn.prepare(
+                "SELECT id, full_name, preferred_name, status, intake_date FROM patients
+                 WHERE deleted_at IS NOT NULL
+                 ORDER BY deleted_at DESC",
+            )?;
+            stmt.query_map([], map_summary_row)?
+        }
+    };
+    rows.collect()
+}
+
 fn map_summary_row(row: &Row) -> rusqlite::Result<PatientSummary> {
     Ok(PatientSummary {
         id: row.get(0)?,

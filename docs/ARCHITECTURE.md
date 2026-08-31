@@ -1046,11 +1046,12 @@ de producto/privacidad en vez del ángulo de amenaza técnica.
 
 ## 17. Estado de avance
 
-> **Nota (31 de agosto de 2026):** actualización solo de documentación — se integraron a este
-> documento las secciones 14, 15 y 16 (identidad visual/tokens, objetivo de multiplataforma y
-> sincronización futura, y principios de privacidad no negociables). No hubo cambios de código,
-> no se agregaron dependencias y no se avanzó a la Fase 1.6; el estado de las fases sigue siendo
-> el de la tabla de abajo.
+> **Nota (31 de agosto de 2026):** las reglas permanentes de proceso para todo el proyecto quedaron
+> fijadas en `CLAUDE.md` (estabilidad y no retroceso, migraciones no destructivas, datos de
+> desarrollo siempre ficticios, principios de seguridad no negociables, Backup≠Sync≠Export,
+> multiplataforma futura, identidad visual, regresión obligatoria, informe de cierre de fase, y
+> regla de detenerse). La Fase 1.6 se ejecutó bajo esas reglas — ver detalle en
+> `docs/patients-vertical.md`, sección "Fase 1.6".
 
 | Fase | Estado | Verificado |
 |---|---|---|
@@ -1059,6 +1060,6 @@ de producto/privacidad en vez del ángulo de amenaza técnica.
 | **1.3** — Migraciones y esquema completo | ✅ Completada | `rusqlite_migration` 2.6.0 (una sola migración V1 con las 25 tablas); 29/29 tests en verde (11 de la 1.2 + 18 nuevos) cubriendo creación desde cero, foreign keys, índices/CHECK, un caso de datos relacionados de punta a punta en todos los dominios, rechazo de estados inválidos, verificación de que el esquema funciona sobre SQLCipher y no sobre SQLite plano, y que reaplicar o agregar migraciones no destruye datos existentes. Detalle completo, diferencias respecto al esquema original y decisiones pendientes en `docs/db-schema.md` |
 | **1.4** — Seguridad (Argon2id, envelope encryption, sesión) | ✅ Completada | DEK de 256 bits + Argon2id (RFC 9106) + AES-256-GCM (RustCrypto) para envolver/desenvolver, código de recuperación de 120 bits, cambio de contraseña y recuperación sin re-cifrar la base, bloqueo manual y automático por inactividad con imposibilidad estructural de leer datos bloqueada. 87/87 tests en verde (11+18 de fases previas sin cambios + 58 nuevos) más verificación manual de extremo a extremo sobre la aplicación real compilada (Xvfb + interacción real de mouse/teclado). Primera UI funcional: crear/confirmar código/desbloquear/recuperar/cambiar contraseña/bloquear. Detalle completo en `docs/security.md` |
 | **1.5** — Vertical Pacientes (repositories/services/commands) | ✅ Completada | Capa completa SQLCipher → Repository → Service → Tauri Command → IPC tipado → React, con validación autoritativa en Rust (RUT chileno con dígito verificador, estado, fechas) y minimización de exposición estructural (el listado no puede llevar RUT porque el tipo no lo tiene). Primeras pantallas de datos clínicos reales: listado con buscador contra la base, crear/editar con formulario dividido en secciones, ficha con navegación a las 9 secciones futuras. Router real (react-router-dom) y atajo ⌘/Ctrl+N ya funcionando. 111/111 tests en verde (87 previos + 24 nuevos) más verificación manual de extremo a extremo (crear → cerrar la app → reabrir → desbloquear → paciente persistido → editar → archivar). Detalle completo en `docs/patients-vertical.md` |
-| 1.6 — Cliente IPC + Zod + Zustand | Pendiente | — |
+| **1.6** — Conexión real frontend↔backend para Pacientes (papelera de archivados) | ✅ Completada | El cliente IPC tipado y los esquemas Zod ya existían desde la Fase 1.5 (Zustand sigue sin usarse por diseño: no hay todavía estado de UI efímero que lo justifique). Esta fase cerró la única brecha pendiente de 1.5: vista de pacientes archivados con restauración real desde la interfaz, sobre capacidades de backend (`restore_patient`) que ya existían y ya tenían tests desde la Fase 1.5. 114/114 tests en verde (111 previos sin cambios + 3 nuevos) más verificación manual de extremo a extremo (crear → archivar → ver en "Archivados" → restaurar → cerrar la app → reabrir → desbloquear → persistencia confirmada). Sin cambios de esquema ni dependencias nuevas. Detalle completo en `docs/patients-vertical.md`, sección "Fase 1.6" |
 | 1.7 — Shell de UI y pantalla de bloqueo | Pendiente | — |
 | 1.8 — Suite de pruebas y validación cruzada | Pendiente | — |

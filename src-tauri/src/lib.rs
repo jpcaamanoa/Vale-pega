@@ -64,6 +64,7 @@ pub fn run() {
       commands::create_patient,
       commands::get_patient,
       commands::list_patients,
+      commands::list_archived_patients,
       commands::update_patient,
       commands::archive_patient,
       commands::restore_patient,
