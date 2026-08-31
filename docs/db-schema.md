@@ -128,6 +128,32 @@ archivos `-wal`/`-shm` deben incluirse en cualquier copia si no se hace
 fase donde corresponda (backup, Fase 7, o antes si el rendimiento lo exige)
 en vez de introducirlo de paso en una fase enfocada en integridad relacional.
 
+> **Revisión de la Fase 1.8 (31 de agosto de 2026) — sigue diferido, sin activar.**
+> Se pidió explícitamente investigar y evaluar esta decisión, sin activarla. Hallazgos:
+>
+> - SQLCipher documenta soporte completo para modo WAL: las páginas del archivo `-wal` se cifran
+>   con el mismo esquema por página (HMAC + AES) que el archivo principal, no hay una ruta donde
+>   queden en texto plano. Esto es comportamiento documentado de la librería, **no verificado con
+>   un test propio de este proyecto todavía** — la diferencia importa: es una base razonable para
+>   decidir, no una garantía ya demostrada en este código.
+> - El motivo real para diferirlo sigue siendo de **backup**, no de cifrado: en modo WAL, una copia
+>   consistente del archivo principal sin incluir (o sin hacer `checkpoint` de) `-wal`/`-shm` puede
+>   quedar incompleta. Como el diseño de backup (`docs/ARCHITECTURE.md` sección 9) todavía no
+>   existe como código, activar WAL ahora introduciría un modo de fallo de backup que nadie ha
+>   diseñado todavía para mitigar.
+> - Para una aplicación de escritorio de una sola usuaria con el volumen de datos esperado (un
+>   consultorio individual, no una clínica con decenas de profesionales concurrentes), no hay
+>   indicio de un problema de rendimiento actual que justifique adelantar el cambio — no hay
+>   síntoma que resolver todavía.
+>
+> **Recomendación: mantenerlo diferido hasta la Fase 7 (backup)**, activarlo ahí junto con sus
+> propios tests dedicados (incluyendo uno que verifique en disco que `-wal` queda tan ilegible
+> como el archivo principal, replicando el test
+> `schema_and_data_are_unreadable_as_plain_sqlite_on_disk` de esta fase) y como parte del mismo
+> diseño que decide cómo se hace el `checkpoint` antes de copiar. No se activó en esta fase ni se
+> cambió la estrategia — queda exactamente como se dejó en la Fase 1.3, con esta evaluación
+> agregada como antecedente para cuando corresponda decidir.
+
 ## Tests ejecutados y resultados
 
 `cargo test` en `src-tauri/`: **29/29 en verde** (11 de la Fase 1.2 sin
