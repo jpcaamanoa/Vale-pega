@@ -96,7 +96,7 @@ export function PatientDetailScreen() {
     if (!id) return
     try {
       await patientsApi.archive(id)
-      navigate('/')
+      navigate('/patients')
     } catch (err) {
       setError(typeof err === 'string' ? err : 'No se pudo archivar al paciente.')
     }

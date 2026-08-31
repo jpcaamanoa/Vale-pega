@@ -841,12 +841,23 @@ Al abrir la aplicación (Fase 2), pantalla de inicio con tres bloques, sin sobre
   documentos pendientes cuando corresponda.
 - **Resumen**: pacientes activos, sesiones del mes, ingresos del mes.
 
+> **Estado de implementación (Fase 2, 31 de agosto de 2026):** los tres bloques existen
+> visualmente. Solo "Pacientes activos" (dentro de Resumen) muestra un dato real, obtenido de la
+> misma vertical de Pacientes de la Fase 1.5. "Hoy", "Pendientes", "Sesiones del mes" e "Ingresos
+> del mes" dependen de funcionalidades (Agenda, Sesiones, Pagos) que todavía no existen como
+> backend — se muestran como "Próximamente" de forma explícita, nunca con un número o dato
+> inventado. Detalle completo en `docs/dashboard.md`.
+
 ### C. Ficha de paciente como centro del sistema
 
 La ficha de un paciente es el punto de acceso rápido a: resumen, antecedentes, sesiones, notas,
 formulación, objetivos, evaluaciones, documentos, pagos y línea temporal. Se diseña (Fase 2) como
 un layout con navegación lateral/tabs dentro de la ficha, no como pantallas aisladas sin relación
 entre sí.
+
+> **Estado de implementación:** este layout ya existía desde la Fase 1.5 (`PatientDetailScreen`,
+> con las 9 secciones como tabs reales, "Resumen" con contenido y el resto marcado
+> "Próximamente"). La Fase 2 no lo modificó — se reutilizó tal cual, sin reconstruirlo.
 
 ### D. Creación de sesión — rápida, sin generación automática de contenido clínico
 
@@ -1102,5 +1113,6 @@ SQLCipher + envelope encryption, gestiona pacientes de punta a punta (crear/edit
 restaurar) con persistencia real verificada a través de reinicios completos del proceso, y tiene
 una identidad visual consistente en toda la interfaz. Sin deuda técnica crítica ni importante
 pendiente; los pendientes menores (modo WAL, validación física multiplataforma) están
-documentados explícitamente, no ocultos. No se avanza a la Fase 2 hasta recibir aprobación
-explícita del informe de cierre (`docs/fase-1-cierre.md`).
+documentados explícitamente, no ocultos.
+
+| **2** — Dashboard como pantalla de inicio | ✅ Completada | `/` pasa a ser el Dashboard (sección 13.B); `/patients` recibe el listado que antes vivía en `/`. Del Dashboard, solo "Pacientes activos" muestra un dato real (vía `patientsApi.list()`, sin backend nuevo); "Hoy", "Pendientes", "Sesiones del mes" e "Ingresos del mes" se muestran explícitamente como "Próximamente" — ningún número inventado. Nav "Inicio"/"Pacientes" agregado al header. Ficha de paciente (sección 13.C) reutilizada sin modificar, ya existía desde la Fase 1.5. Cero cambios en Rust, cero migraciones, cero dependencias nuevas. 114/114 tests Rust sin cambios, build/lint frontend limpios, `cargo clippy` sin advertencias, más verificación manual completa (Dashboard sin pacientes → con paciente ficticio → click a `/patients` → archivar → conteo actualizado → restaurar → cierre completo del proceso → reapertura → desbloquear → aterriza en Dashboard con el conteo persistido) sobre un **vault de prueba separado**. Detalle completo en `docs/dashboard.md` |

@@ -8,6 +8,7 @@ import { RecoveryCodeScreen } from './features/auth/RecoveryCodeScreen'
 import type { VaultStatus } from './features/auth/types'
 import { UnlockScreen } from './features/auth/UnlockScreen'
 import { useRecordActivity } from './features/auth/useRecordActivity'
+import { DashboardScreen } from './features/dashboard/DashboardScreen'
 import { PatientCreateScreen } from './features/patients/PatientCreateScreen'
 import { PatientDetailScreen } from './features/patients/PatientDetailScreen'
 import { PatientEditScreen } from './features/patients/PatientEditScreen'
@@ -94,7 +95,8 @@ function App() {
         <HashRouter>
           <Routes>
             <Route element={<Layout onLocked={() => setScreen({ kind: 'unlock' })} />}>
-              <Route path="/" element={<PatientsListScreen />} />
+              <Route path="/" element={<DashboardScreen />} />
+              <Route path="/patients" element={<PatientsListScreen />} />
               <Route path="/patients/new" element={<PatientCreateScreen />} />
               <Route path="/patients/:id" element={<PatientDetailScreen />} />
               <Route path="/patients/:id/edit" element={<PatientEditScreen />} />
