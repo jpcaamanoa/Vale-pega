@@ -718,6 +718,30 @@ No se promete seguridad absoluta en ningún punto.
 | 1.7 | Shell de UI: routing, layout, tema, pantalla de bloqueo/desbloqueo | 1.6 | Prueba manual de navegación | Se navega entre secciones vacías, pantalla de lock funcional |
 | 1.8 | Suite de pruebas y validación cruzada mac/Windows | 1.1–1.7 | `cargo test` + smoke test manual en ambas plataformas | Todo lo anterior verde en al menos macOS; Windows si el entorno lo permite en esta fase |
 
+> **Nota (31 de agosto de 2026) — el orden real de ejecución divergió de esta tabla a partir de
+> 1.5, y eso es intencional, no un error.** Esta tabla es el plan *original*, escrito antes de
+> empezar a implementar, y se conserva tal cual por valor histórico. En la práctica:
+>
+> - El "Paso 1.6" de esta tabla (cliente IPC tipado + Zod espejo) **se implementó dentro de la
+>   Fase 1.5**, no como paso separado — el vertical de Pacientes se construyó de punta a punta
+>   (SQLCipher → Repository → Service → Command → IPC tipado → React → UI) en un solo commit, en
+>   vez de partir el cliente IPC de su primer caso de uso real. Zustand, en cambio, sigue sin
+>   instalarse: no ha aparecido todavía un estado de UI efímero que lo justifique (ver sección 17,
+>   fila de la Fase 1.6).
+> - Lo que efectivamente se ejecutó y se aprobó como **"Fase 1.6" (31 de agosto de 2026)** fue
+>   distinto: cerrar la única brecha que quedó pendiente de la Fase 1.5 (la papelera de pacientes
+>   archivados, con restauración real desde la interfaz). Ver el detalle completo en
+>   `docs/patients-vertical.md`, sección "Fase 1.6", y el resumen en la sección 17 de este
+>   documento.
+> - La Fase 1.7 real (sistema visual, design tokens y consolidación de la UI, ver sección 17) sí
+>   corresponde al "Paso 1.7" de esta tabla ("tema" incluido), así que a partir de aquí el plan y
+>   la ejecución vuelven a coincidir en el nombre, aunque el contenido de 1.7 es más amplio de lo
+>   que esta tabla original anticipaba (identidad visual completa, no solo el mecanismo de tema).
+>
+> En resumen: el número de fase en la sección 17 ("Estado de avance") es siempre la fuente de
+> verdad sobre qué se implementó y cuándo — esta tabla documenta únicamente la intención original
+> de agosto de 2026, no el historial real de ejecución.
+
 **Definición de "Fase 1 terminada":** se puede abrir la app, crear un vault con contraseña real,
 cerrarla, reabrirla, desbloquearla, crear/editar/eliminar (soft) un paciente real que persiste
 cifrado en disco, y toda la suite de tests automatizados pasa. Sin datos de mentira sustituyendo
