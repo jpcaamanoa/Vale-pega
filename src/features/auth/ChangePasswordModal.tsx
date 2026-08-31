@@ -54,9 +54,9 @@ export function ChangePasswordModal({ onClose, onChanged }: { onClose: () => voi
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
-      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-lg">
-        <h2 className="mb-4 text-base font-semibold text-slate-900">Cambiar contraseña</h2>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 px-4">
+      <div className="w-full max-w-sm rounded-2xl bg-surface-elevated p-6 shadow-lg">
+        <h2 className="mb-4 text-base font-semibold text-foreground">Cambiar contraseña</h2>
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
           <PasswordField
             label="Contraseña actual"
@@ -79,7 +79,7 @@ export function ChangePasswordModal({ onClose, onChanged }: { onClose: () => voi
             {...register('confirmPassword')}
             error={errors.confirmPassword?.message}
           />
-          {serverError && <p className="text-sm text-red-600">{serverError}</p>}
+          {serverError && <p className="text-sm text-danger">{serverError}</p>}
           <div className="mt-2 flex gap-2">
             <Button type="button" variant="secondary" onClick={onClose} className="flex-1">
               Cancelar

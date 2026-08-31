@@ -70,7 +70,7 @@ export function CreateVaultScreen({ onCreated }: { onCreated: (recoveryCode: str
           {...register('confirmPassword')}
           error={errors.confirmPassword?.message}
         />
-        {serverError && <p className="text-sm text-red-600">{serverError}</p>}
+        {serverError && <p className="text-sm text-danger">{serverError}</p>}
         <Button type="submit" disabled={isSubmitting} className="mt-2 w-full">
           {isSubmitting ? 'Creando…' : 'Continuar'}
         </Button>

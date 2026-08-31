@@ -47,17 +47,15 @@ export function PatientsListScreen() {
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-10">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-900">Pacientes</h1>
+        <h1 className="text-xl font-semibold text-foreground">Pacientes</h1>
         <Button onClick={() => navigate('/patients/new')}>Nuevo paciente</Button>
       </div>
 
-      <div className="flex gap-1 border-b border-slate-200">
+      <div className="flex gap-1 border-b border-border">
         <button
           onClick={() => setView('active')}
           className={`px-3 py-2 text-sm font-medium transition-colors ${
-            view === 'active'
-              ? 'border-b-2 border-slate-900 text-slate-900'
-              : 'text-slate-500 hover:text-slate-800'
+            view === 'active' ? 'border-b-2 border-accent text-accent' : 'text-muted-foreground hover:text-foreground'
           }`}
         >
           Activos
@@ -66,8 +64,8 @@ export function PatientsListScreen() {
           onClick={() => setView('archived')}
           className={`px-3 py-2 text-sm font-medium transition-colors ${
             view === 'archived'
-              ? 'border-b-2 border-slate-900 text-slate-900'
-              : 'text-slate-500 hover:text-slate-800'
+              ? 'border-b-2 border-accent text-accent'
+              : 'text-muted-foreground hover:text-foreground'
           }`}
         >
           Archivados
@@ -79,41 +77,41 @@ export function PatientsListScreen() {
         placeholder="Buscar por nombre…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500"
+        className="w-full rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-foreground outline-none focus:border-accent focus:ring-1 focus:ring-accent"
         autoFocus
       />
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
-      {loading && <p className="text-sm text-slate-400">Cargando…</p>}
+      {error && <p className="text-sm text-danger">{error}</p>}
+      {loading && <p className="text-sm text-muted-foreground">Cargando…</p>}
 
-      <div className="overflow-hidden rounded-lg border border-slate-200">
+      <div className="overflow-hidden rounded-lg border border-border">
         <table className="w-full text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+          <thead className="bg-surface text-xs uppercase tracking-wide text-muted-foreground">
             <tr>
               <th className="px-4 py-2.5 font-medium">Nombre</th>
               <th className="px-4 py-2.5 font-medium">Estado</th>
               <th className="px-4 py-2.5 font-medium">Ingreso</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-border">
             {patients.map((p) => (
               <tr
                 key={p.id}
                 onClick={() => navigate(`/patients/${p.id}`)}
-                className="cursor-pointer hover:bg-slate-50"
+                className="cursor-pointer hover:bg-accent-soft"
               >
                 <td className="px-4 py-3">
-                  <div className="font-medium text-slate-900">{p.fullName}</div>
-                  {p.preferredName && <div className="text-xs text-slate-500">{p.preferredName}</div>}
+                  <div className="font-medium text-foreground">{p.fullName}</div>
+                  {p.preferredName && <div className="text-xs text-muted-foreground">{p.preferredName}</div>}
                 </td>
-                <td className="px-4 py-3 text-slate-600">{PATIENT_STATUS_LABELS[p.status]}</td>
-                <td className="px-4 py-3 text-slate-600">{p.intakeDate ?? '—'}</td>
+                <td className="px-4 py-3 text-muted-foreground">{PATIENT_STATUS_LABELS[p.status]}</td>
+                <td className="px-4 py-3 text-muted-foreground">{p.intakeDate ?? '—'}</td>
               </tr>
             ))}
           </tbody>
         </table>
         {!loading && patients.length === 0 && (
-          <p className="px-4 py-8 text-center text-sm text-slate-400">
+          <p className="px-4 py-8 text-center text-sm text-muted-foreground">
             {view === 'archived'
               ? query
                 ? 'No se encontraron pacientes archivados.'

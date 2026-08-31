@@ -12,16 +12,17 @@ export function Layout({ onLocked }: { onLocked: () => void }) {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3">
-        <Link to="/" className="text-sm font-semibold text-slate-900">
+    <div className="min-h-screen bg-background">
+      <header className="flex items-center justify-between border-b border-border bg-surface-elevated px-6 py-3">
+        <Link to="/" className="flex items-center gap-2 text-sm font-semibold text-foreground">
+          <span className="h-2 w-2 rounded-full bg-accent" aria-hidden="true" />
           Cuaderno Clínico
         </Link>
-        <div className="flex gap-4 text-xs text-slate-500">
-          <button onClick={() => setShowChangePassword(true)} className="hover:text-slate-800">
+        <div className="flex gap-4 text-xs text-muted-foreground">
+          <button onClick={() => setShowChangePassword(true)} className="hover:text-accent">
             Cambiar contraseña
           </button>
-          <button onClick={handleLock} className="hover:text-slate-800">
+          <button onClick={handleLock} className="hover:text-accent">
             Bloquear
           </button>
         </div>

@@ -28,8 +28,8 @@ function patientToFormValues(patient?: Patient): Partial<PatientFormValues> {
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="flex flex-col gap-4 border-b border-slate-100 pb-6 last:border-b-0 last:pb-0">
-      <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
+    <section className="flex flex-col gap-4 border-b border-border pb-6 last:border-b-0 last:pb-0">
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{children}</div>
     </section>
   )

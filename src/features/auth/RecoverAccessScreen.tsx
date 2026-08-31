@@ -61,17 +61,17 @@ export function RecoverAccessScreen({ onRecovered, onBack }: { onRecovered: () =
     >
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <label htmlFor="recoveryCode" className="text-sm font-medium text-slate-700">
+          <label htmlFor="recoveryCode" className="text-sm font-medium text-foreground">
             Código de recuperación
           </label>
           <input
             id="recoveryCode"
             placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
             autoComplete="off"
-            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 font-mono text-sm uppercase tracking-wide outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500"
+            className="w-full rounded-lg border border-border bg-surface px-3 py-2.5 font-mono text-sm text-foreground uppercase tracking-wide outline-none focus:border-accent focus:ring-1 focus:ring-accent"
             {...register('recoveryCode')}
           />
-          {errors.recoveryCode && <p className="text-sm text-red-600">{errors.recoveryCode.message}</p>}
+          {errors.recoveryCode && <p className="text-sm text-danger">{errors.recoveryCode.message}</p>}
         </div>
         <div className="flex flex-col gap-1.5">
           <PasswordField
@@ -88,11 +88,11 @@ export function RecoverAccessScreen({ onRecovered, onBack }: { onRecovered: () =
           {...register('confirmPassword')}
           error={errors.confirmPassword?.message}
         />
-        {serverError && <p className="text-sm text-red-600">{serverError}</p>}
+        {serverError && <p className="text-sm text-danger">{serverError}</p>}
         <Button type="submit" disabled={isSubmitting} className="w-full">
           {isSubmitting ? 'Verificando…' : 'Recuperar acceso'}
         </Button>
-        <button type="button" onClick={onBack} className="text-center text-xs text-slate-500 hover:text-slate-700">
+        <button type="button" onClick={onBack} className="text-center text-xs text-muted-foreground hover:text-accent">
           Volver a desbloquear con contraseña
         </button>
       </form>

@@ -916,23 +916,24 @@ identidad visual y la privacidad visual comparten mecanismo: ambas dependen de q
 "qué se muestra en pantalla" sea gobernable de forma centralizada (tokens de diseño +
 `privacy_mode` en `app_settings`), no decisiones sueltas repetidas en cada pantalla.
 
-### D. Afecta la arquitectura actual — y contradicción detectada
+### D. Afecta la arquitectura actual — contradicción detectada y resuelta en la Fase 1.7
 
 Esto **sí afecta el frontend ya implementado**, aunque no toca Rust, la base de datos ni el
-módulo de seguridad. Se deja constancia explícita, tal como se pidió, sin corregirlo en este
-paso:
+módulo de seguridad.
 
-> **Contradicción detectada (no corregida en este documento):** los componentes de React
-> construidos en las Fases 1.1–1.5 (`src/components/ui/*`, `src/features/auth/*`,
-> `src/features/patients/*`, `src/app/Layout.tsx`, `src/App.tsx`) usan clases de la paleta por
-> defecto de Tailwind escritas directamente componente por componente (`bg-slate-900`,
-> `bg-slate-50`, `text-red-600`, `bg-emerald-500`, etc.), sin una capa de tokens centralizada ni
-> el color de acento `#2D5128`. Esto contradice el principio A de esta sección. **No se modifica
-> ningún componente en este documento ni en este turno** — el plan de implementación (sección 11)
-> ya reserva la Fase 1.7 ("Shell de UI: routing, layout, **tema**, pantalla de bloqueo/desbloqueo")
-> para introducir la capa de tokens; ese es el momento natural para migrar los componentes
-> existentes a los tokens, en vez de hacerlo ad hoc ahora. Se reporta como pendiente técnico
-> explícito, no como bug bloqueante.
+> **Contradicción detectada el 31 de agosto de 2026, resuelta en la Fase 1.7 (mismo día).** Los
+> componentes de React construidos en las Fases 1.1–1.5 (`src/components/ui/*`,
+> `src/features/auth/*`, `src/features/patients/*`, `src/app/Layout.tsx`, `src/App.tsx`) usaban
+> clases de la paleta por defecto de Tailwind escritas directamente componente por componente
+> (`bg-slate-900`, `bg-slate-50`, `text-red-600`, `bg-emerald-500`, etc.), sin una capa de tokens
+> centralizada ni el color de acento `#2D5128` — contradiciendo el principio A de esta sección.
+> Cuando se detectó, se dejó constancia explícita sin corregirla de inmediato, reservando la
+> migración para la Fase 1.7 ("Shell de UI: routing, layout, **tema**"), que era el momento
+> natural para hacerlo de una vez y no ad hoc. Esa fase ya se ejecutó: los tokens se definieron en
+> `src/index.css` (bloque `@theme` de Tailwind v4) y **todos** los componentes listados arriba se
+> migraron a consumirlos — ya no queda ninguna clase de paleta por defecto de Tailwind en `src/`.
+> Detalle completo (tabla de tokens, contraste WCAG verificado, capturas de la aplicación real) en
+> `docs/design-tokens.md`.
 
 ---
 
@@ -1085,5 +1086,5 @@ de producto/privacidad en vez del ángulo de amenaza técnica.
 | **1.4** — Seguridad (Argon2id, envelope encryption, sesión) | ✅ Completada | DEK de 256 bits + Argon2id (RFC 9106) + AES-256-GCM (RustCrypto) para envolver/desenvolver, código de recuperación de 120 bits, cambio de contraseña y recuperación sin re-cifrar la base, bloqueo manual y automático por inactividad con imposibilidad estructural de leer datos bloqueada. 87/87 tests en verde (11+18 de fases previas sin cambios + 58 nuevos) más verificación manual de extremo a extremo sobre la aplicación real compilada (Xvfb + interacción real de mouse/teclado). Primera UI funcional: crear/confirmar código/desbloquear/recuperar/cambiar contraseña/bloquear. Detalle completo en `docs/security.md` |
 | **1.5** — Vertical Pacientes (repositories/services/commands) | ✅ Completada | Capa completa SQLCipher → Repository → Service → Tauri Command → IPC tipado → React, con validación autoritativa en Rust (RUT chileno con dígito verificador, estado, fechas) y minimización de exposición estructural (el listado no puede llevar RUT porque el tipo no lo tiene). Primeras pantallas de datos clínicos reales: listado con buscador contra la base, crear/editar con formulario dividido en secciones, ficha con navegación a las 9 secciones futuras. Router real (react-router-dom) y atajo ⌘/Ctrl+N ya funcionando. 111/111 tests en verde (87 previos + 24 nuevos) más verificación manual de extremo a extremo (crear → cerrar la app → reabrir → desbloquear → paciente persistido → editar → archivar). Detalle completo en `docs/patients-vertical.md` |
 | **1.6** — Conexión real frontend↔backend para Pacientes (papelera de archivados) | ✅ Completada | El cliente IPC tipado y los esquemas Zod ya existían desde la Fase 1.5 (Zustand sigue sin usarse por diseño: no hay todavía estado de UI efímero que lo justifique). Esta fase cerró la única brecha pendiente de 1.5: vista de pacientes archivados con restauración real desde la interfaz, sobre capacidades de backend (`restore_patient`) que ya existían y ya tenían tests desde la Fase 1.5. 114/114 tests en verde (111 previos sin cambios + 3 nuevos) más verificación manual de extremo a extremo (crear → archivar → ver en "Archivados" → restaurar → cerrar la app → reabrir → desbloquear → persistencia confirmada). Sin cambios de esquema ni dependencias nuevas. Detalle completo en `docs/patients-vertical.md`, sección "Fase 1.6" |
-| 1.7 — Shell de UI y pantalla de bloqueo | Pendiente | — |
+| **1.7** — Sistema visual, design tokens y consolidación de la UI | ✅ Completada | Tokens definidos en `src/index.css` (`@theme` de Tailwind v4): background/surface/surface-elevated/foreground/muted-foreground/border/accent(+hover/active/soft)/success/warning/danger/focus/disabled, con `#2D5128` como acento único. Los 17 archivos de `src/` que tenían clases de la paleta por defecto de Tailwind (`slate-*`, `emerald-*`, `red-*`, `amber-*`) se migraron a los tokens — cero clases de paleta por defecto restantes en todo `src/`. Contraste WCAG verificado matemáticamente para cada combinación texto/fondo (mínimo 4.5:1, la mayoría AAA). Anillo de foco visible globalmente vía `:focus-visible`. Sin cambios en Rust, sin cambios de esquema, sin dependencias nuevas. 114/114 tests Rust sin cambios, build/lint frontend limpios, `cargo clippy` sin advertencias, más verificación manual completa sobre la aplicación real compilada (bloqueo/desbloqueo, creación de vault, código de recuperación, pacientes activos/archivados, ficha de paciente, ciclo archivar→restaurar) con capturas de pantalla. Detalle completo en `docs/design-tokens.md` |
 | 1.8 — Suite de pruebas y validación cruzada | Pendiente | — |

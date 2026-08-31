@@ -40,23 +40,23 @@ export function RecoveryCodeScreen({
       subtitle="Es la única forma de recuperar el acceso si olvidas tu contraseña. No se puede volver a mostrar después de este paso."
     >
       <div className="flex flex-col gap-4">
-        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-center">
-          <code className="text-base font-semibold tracking-wider text-slate-900">{recoveryCode}</code>
+        <div className="rounded-lg border border-warning/40 bg-warning-soft p-4 text-center">
+          <code className="text-base font-semibold tracking-wider text-foreground">{recoveryCode}</code>
         </div>
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-muted-foreground">
           Guárdalo en un gestor de contraseñas o en un lugar físico seguro, fuera de esta aplicación. Si pierdes la
           contraseña y este código a la vez, tus datos serán irrecuperables.
         </p>
-        <label className="flex items-start gap-2 text-sm text-slate-700">
+        <label className="flex items-start gap-2 text-sm text-foreground">
           <input
             type="checkbox"
             checked={confirmed}
             onChange={(e) => setConfirmed(e.target.checked)}
-            className="mt-0.5"
+            className="mt-0.5 accent-accent"
           />
           Ya guardé mi código de recuperación en un lugar seguro.
         </label>
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {error && <p className="text-sm text-danger">{error}</p>}
         <Button onClick={handleContinue} disabled={!confirmed || submitting} className="w-full">
           {submitting ? 'Creando el cuaderno…' : 'Continuar'}
         </Button>
@@ -64,7 +64,7 @@ export function RecoveryCodeScreen({
           type="button"
           onClick={handleCancel}
           disabled={submitting}
-          className="text-center text-xs text-slate-400 hover:text-slate-600"
+          className="text-center text-xs text-muted-foreground hover:text-foreground"
         >
           Cancelar y empezar de nuevo
         </button>

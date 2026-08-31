@@ -1,1 +1,54 @@
 @import "tailwindcss";
+
+/*
+ * Design tokens (Fase 1.7) — fuente única de verdad de la identidad visual.
+ * Ver docs/design-tokens.md para el detalle completo (tabla de contraste
+ * WCAG, mapeo de conceptos, y cómo evolucionar esto a un tema oscuro).
+ *
+ * Tailwind v4 compila cada `--color-*` de este bloque como variable CSS real
+ * en `:root` Y genera las utilidades correspondientes (bg-accent, text-accent,
+ * border-accent, etc.) — los componentes consumen esas utilidades, nunca un
+ * color de la paleta por defecto de Tailwind ni un hexadecimal suelto.
+ */
+@theme {
+  --color-background: #f7f5f1;
+  --color-surface: #fdfcfa;
+  --color-surface-elevated: #ffffff;
+
+  --color-foreground: #2a2622;
+  --color-muted-foreground: #6b6459;
+
+  --color-border: #d6d0c2;
+
+  /* Verde de identidad aprobado — único acento de marca de la aplicación. */
+  --color-accent: #2d5128;
+  --color-accent-hover: #24401f;
+  --color-accent-active: #1c3218;
+  --color-accent-soft: #e8ede6;
+  --color-accent-foreground: #ffffff;
+
+  --color-success: #2a6640;
+  --color-success-soft: #e7f0ea;
+  --color-warning: #7a5313;
+  --color-warning-soft: #fbf3e4;
+  --color-danger: #b3403a;
+  --color-danger-soft: #fbeae8;
+
+  --color-focus: #2d5128;
+
+  --color-disabled: #edebe6;
+  --color-disabled-foreground: #8f8879;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Foco de teclado visible en toda la aplicación, sin depender de que cada
+     componente lo reimplemente por separado. */
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+}

@@ -30,12 +30,12 @@ export function PatientEditScreen() {
     }
   }
 
-  if (error) return <p className="p-10 text-sm text-red-600">{error}</p>
-  if (!patient) return <p className="p-10 text-sm text-slate-400">Cargando…</p>
+  if (error) return <p className="p-10 text-sm text-danger">{error}</p>
+  if (!patient) return <p className="p-10 text-sm text-muted-foreground">Cargando…</p>
 
   return (
     <div className="mx-auto max-w-2xl px-6 py-10">
-      <h1 className="mb-6 text-xl font-semibold text-slate-900">Editar paciente</h1>
+      <h1 className="mb-6 text-xl font-semibold text-foreground">Editar paciente</h1>
       <PatientForm
         patient={patient}
         onSubmit={handleSubmit}

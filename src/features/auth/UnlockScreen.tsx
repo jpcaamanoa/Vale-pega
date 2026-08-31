@@ -42,14 +42,14 @@ export function UnlockScreen({ onUnlocked, onForgotPassword }: { onUnlocked: () 
           {...register('password')}
           error={errors.password?.message}
         />
-        {serverError && <p className="text-sm text-red-600">{serverError}</p>}
+        {serverError && <p className="text-sm text-danger">{serverError}</p>}
         <Button type="submit" disabled={isSubmitting} className="w-full">
           {isSubmitting ? 'Verificando…' : 'Desbloquear'}
         </Button>
         <button
           type="button"
           onClick={onForgotPassword}
-          className="text-center text-xs text-slate-500 hover:text-slate-700"
+          className="text-center text-xs text-muted-foreground hover:text-accent"
         >
           ¿Olvidaste tu contraseña? Recuperar acceso
         </button>

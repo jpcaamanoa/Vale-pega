@@ -34,9 +34,9 @@ const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen']
 
 function SummaryRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
-    <div className="flex justify-between border-b border-slate-100 py-2 text-sm last:border-b-0">
-      <span className="text-slate-500">{label}</span>
-      <span className="text-slate-900">{value || '—'}</span>
+    <div className="flex justify-between border-b border-border py-2 text-sm last:border-b-0">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="text-foreground">{value || '—'}</span>
     </div>
   )
 }
@@ -45,26 +45,26 @@ function ResumenSection({ patient }: { patient: Patient }) {
   return (
     <div className="grid grid-cols-1 gap-8 sm:grid-cols-2">
       <div>
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Datos personales</h3>
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Datos personales</h3>
         <SummaryRow label="Nombre completo" value={patient.fullName} />
         <SummaryRow label="Nombre preferido" value={patient.preferredName} />
         <SummaryRow label="RUT" value={patient.rut} />
         <SummaryRow label="Fecha de nacimiento" value={patient.birthDate} />
       </div>
       <div>
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Contacto</h3>
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Contacto</h3>
         <SummaryRow label="Teléfono" value={patient.phone} />
         <SummaryRow label="Correo" value={patient.email} />
         <SummaryRow label="Dirección" value={patient.address} />
       </div>
       <div>
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Contacto de emergencia</h3>
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Contacto de emergencia</h3>
         <SummaryRow label="Nombre" value={patient.emergencyContactName} />
         <SummaryRow label="Teléfono" value={patient.emergencyContactPhone} />
         <SummaryRow label="Relación" value={patient.emergencyContactRelationship} />
       </div>
       <div>
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Administrativo</h3>
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Administrativo</h3>
         <SummaryRow label="Estado" value={PATIENT_STATUS_LABELS[patient.status]} />
         <SummaryRow label="Derivado por" value={patient.referredBy} />
         <SummaryRow label="Fecha de ingreso" value={patient.intakeDate} />
@@ -113,15 +113,15 @@ export function PatientDetailScreen() {
     }
   }
 
-  if (error) return <p className="p-10 text-sm text-red-600">{error}</p>
-  if (!patient) return <p className="p-10 text-sm text-slate-400">Cargando…</p>
+  if (error) return <p className="p-10 text-sm text-danger">{error}</p>
+  if (!patient) return <p className="p-10 text-sm text-muted-foreground">Cargando…</p>
 
   const isArchived = patient.deletedAt !== null
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-10">
       {isArchived && (
-        <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        <div className="mb-6 rounded-lg border border-warning/40 bg-warning-soft px-4 py-3 text-sm text-warning">
           Este paciente está archivado. No aparece en el listado de pacientes activos ni puede
           editarse hasta que se restaure.
         </div>
@@ -129,8 +129,8 @@ export function PatientDetailScreen() {
 
       <div className="mb-6 flex items-start justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-slate-900">{patient.fullName}</h1>
-          {patient.preferredName && <p className="text-sm text-slate-500">{patient.preferredName}</p>}
+          <h1 className="text-xl font-semibold text-foreground">{patient.fullName}</h1>
+          {patient.preferredName && <p className="text-sm text-muted-foreground">{patient.preferredName}</p>}
         </div>
         <div className="flex gap-2">
           {isArchived ? (
@@ -150,15 +150,15 @@ export function PatientDetailScreen() {
         </div>
       </div>
 
-      <nav className="mb-6 flex flex-wrap gap-1 border-b border-slate-200">
+      <nav className="mb-6 flex flex-wrap gap-1 border-b border-border">
         {SECTIONS.map((s) => (
           <button
             key={s.id}
             onClick={() => setSection(s.id)}
             className={`px-3 py-2 text-sm font-medium transition-colors ${
               section === s.id
-                ? 'border-b-2 border-slate-900 text-slate-900'
-                : 'text-slate-500 hover:text-slate-800'
+                ? 'border-b-2 border-accent text-accent'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             {s.label}
@@ -169,14 +169,14 @@ export function PatientDetailScreen() {
       {SECTIONS_WITH_REAL_CONTENT.includes(section) ? (
         section === 'resumen' && <ResumenSection patient={patient} />
       ) : (
-        <p className="py-16 text-center text-sm text-slate-400">Próximamente.</p>
+        <p className="py-16 text-center text-sm text-muted-foreground">Próximamente.</p>
       )}
 
       {confirmingArchive && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-lg">
-            <h2 className="mb-2 text-base font-semibold text-slate-900">Archivar paciente</h2>
-            <p className="mb-4 text-sm text-slate-600">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-surface-elevated p-6 shadow-lg">
+            <h2 className="mb-2 text-base font-semibold text-foreground">Archivar paciente</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
               El paciente se marcará como archivado y dejará de aparecer en el listado. No se elimina ninguna
               información — puede recuperarse más adelante.
             </p>
@@ -191,10 +191,10 @@ export function PatientDetailScreen() {
       )}
 
       {confirmingRestore && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-lg">
-            <h2 className="mb-2 text-base font-semibold text-slate-900">Restaurar paciente</h2>
-            <p className="mb-4 text-sm text-slate-600">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-surface-elevated p-6 shadow-lg">
+            <h2 className="mb-2 text-base font-semibold text-foreground">Restaurar paciente</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
               El paciente volverá a aparecer en el listado de pacientes activos, con todos sus
               datos intactos.
             </p>

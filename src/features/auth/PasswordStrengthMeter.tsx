@@ -9,9 +9,9 @@ const LABELS: Record<PasswordStrength['label'], string> = {
 }
 
 const COLORS: Record<PasswordStrength['label'], string> = {
-  debil: 'bg-red-500',
-  aceptable: 'bg-amber-500',
-  fuerte: 'bg-emerald-500',
+  debil: 'bg-danger',
+  aceptable: 'bg-warning',
+  fuerte: 'bg-success',
 }
 
 /**
@@ -40,13 +40,13 @@ export function PasswordStrengthMeter({ password }: { password: string }) {
 
   return (
     <div className="flex items-center gap-2">
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-200">
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
         <div
           className={`h-full transition-all ${COLORS[strength.label]}`}
           style={{ width: `${strength.score}%` }}
         />
       </div>
-      <span className="w-16 text-right text-xs text-slate-500">{LABELS[strength.label]}</span>
+      <span className="w-16 text-right text-xs text-muted-foreground">{LABELS[strength.label]}</span>
     </div>
   )
 }

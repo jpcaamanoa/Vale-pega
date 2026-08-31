@@ -61,8 +61,8 @@ function App() {
   switch (screen.kind) {
     case 'loading':
       return (
-        <main className="flex min-h-screen items-center justify-center bg-slate-50">
-          <p className="text-sm text-slate-400">Cargando…</p>
+        <main className="flex min-h-screen items-center justify-center bg-background">
+          <p className="text-sm text-muted-foreground">Cargando…</p>
         </main>
       )
     case 'create':
