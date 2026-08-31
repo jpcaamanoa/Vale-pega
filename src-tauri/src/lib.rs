@@ -1,3 +1,4 @@
+mod calendar;
 mod commands;
 mod db;
 mod repositories;
@@ -68,6 +69,22 @@ pub fn run() {
       commands::update_patient,
       commands::archive_patient,
       commands::restore_patient,
+      commands::create_appointment,
+      commands::get_appointment,
+      commands::list_appointments,
+      commands::list_archived_appointments,
+      commands::check_overlap,
+      commands::update_appointment,
+      commands::cancel_appointment,
+      commands::archive_appointment,
+      commands::restore_appointment,
+      commands::google_connection_status,
+      commands::save_google_credentials,
+      commands::begin_google_auth,
+      commands::list_google_calendars,
+      commands::select_google_calendar,
+      commands::disconnect_google_calendar,
+      commands::retry_appointment_sync,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

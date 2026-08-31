@@ -621,6 +621,16 @@ arquitectura.
 - **Revocación**: botón "Desconectar Google Calendar" → llama al endpoint de revocación de
   Google, borra tokens del keychain, marca los `google_event_id` existentes como inactivos.
 
+> **Nota (Fase 3, implementado):** esta sección describe el diseño aprobado antes de construirlo;
+> `docs/google-calendar.md` es la referencia autoritativa de lo efectivamente implementado, con
+> dos precisiones sobre lo escrito arriba: (1) solo el `refresh_token` va al keychain — el
+> `access_token` deliberadamente no se cachea en ningún lado, se pide uno nuevo antes de cada
+> llamada; (2) desconectar borra el `refresh_token` del keychain y el calendario seleccionado,
+> pero no recorre `appointments` marcando sus `google_event_id` como inactivos — un vínculo
+> obsoleto se limpia solo, la próxima vez que se intenta usar, por el mismo mecanismo de detección
+> de 404/410 que ya cubre un evento borrado manualmente en Google (ver "Conflictos" arriba). Se
+> documenta la diferencia en vez de ajustar el diseño original para que coincida.
+
 ---
 
 ## 7. Archivos y documentos
@@ -841,12 +851,15 @@ Al abrir la aplicación (Fase 2), pantalla de inicio con tres bloques, sin sobre
   documentos pendientes cuando corresponda.
 - **Resumen**: pacientes activos, sesiones del mes, ingresos del mes.
 
-> **Estado de implementación (Fase 2, 31 de agosto de 2026):** los tres bloques existen
-> visualmente. Solo "Pacientes activos" (dentro de Resumen) muestra un dato real, obtenido de la
-> misma vertical de Pacientes de la Fase 1.5. "Hoy", "Pendientes", "Sesiones del mes" e "Ingresos
-> del mes" dependen de funcionalidades (Agenda, Sesiones, Pagos) que todavía no existen como
+> **Estado de implementación (actualizado en Fase 3, 31 de agosto de 2026):** los tres bloques
+> existen visualmente. "Pacientes activos" (dentro de Resumen) y, desde la Fase 3, "Hoy" muestran
+> datos reales — "Hoy" lista las citas activas del día vía `agendaApi.list()` con el rango de la
+> fecha local, sin distinguir todavía sesión de bloqueo personal más que por el texto mostrado
+> ("Bloqueo personal" cuando no hay paciente). "Pendientes", "Sesiones del mes" e "Ingresos del
+> mes" siguen dependiendo de funcionalidades (Sesiones, Pagos) que todavía no existen como
 > backend — se muestran como "Próximamente" de forma explícita, nunca con un número o dato
-> inventado. Detalle completo en `docs/dashboard.md`.
+> inventado. Detalle de la Fase 2 en `docs/dashboard.md`; detalle de la Agenda y Google Calendar
+> de la Fase 3 en `docs/google-calendar.md`.
 
 ### C. Ficha de paciente como centro del sistema
 

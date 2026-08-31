@@ -29,9 +29,15 @@ export function Layout({ onLocked }: { onLocked: () => void }) {
             <NavLink to="/patients" className={navLinkClassName}>
               Pacientes
             </NavLink>
+            <NavLink to="/agenda" className={navLinkClassName}>
+              Agenda
+            </NavLink>
           </nav>
         </div>
-        <div className="flex gap-4 text-xs text-muted-foreground">
+        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+          <NavLink to="/settings" className={navLinkClassName}>
+            Ajustes
+          </NavLink>
           <button onClick={() => setShowChangePassword(true)} className="hover:text-accent">
             Cambiar contraseña
           </button>

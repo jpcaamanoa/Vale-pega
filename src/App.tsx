@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react'
 import { HashRouter, Route, Routes } from 'react-router-dom'
 import { Layout } from './app/Layout'
+import { AgendaScreen } from './features/agenda/AgendaScreen'
+import { AppointmentCreateScreen } from './features/agenda/AppointmentCreateScreen'
+import { AppointmentDetailScreen } from './features/agenda/AppointmentDetailScreen'
+import { AppointmentEditScreen } from './features/agenda/AppointmentEditScreen'
 import { authApi } from './features/auth/api'
 import { CreateVaultScreen } from './features/auth/CreateVaultScreen'
 import { RecoverAccessScreen } from './features/auth/RecoverAccessScreen'
@@ -13,6 +17,7 @@ import { PatientCreateScreen } from './features/patients/PatientCreateScreen'
 import { PatientDetailScreen } from './features/patients/PatientDetailScreen'
 import { PatientEditScreen } from './features/patients/PatientEditScreen'
 import { PatientsListScreen } from './features/patients/PatientsListScreen'
+import { SettingsScreen } from './features/settings/SettingsScreen'
 
 type Screen =
   | { kind: 'loading' }
@@ -100,6 +105,11 @@ function App() {
               <Route path="/patients/new" element={<PatientCreateScreen />} />
               <Route path="/patients/:id" element={<PatientDetailScreen />} />
               <Route path="/patients/:id/edit" element={<PatientEditScreen />} />
+              <Route path="/agenda" element={<AgendaScreen />} />
+              <Route path="/agenda/new" element={<AppointmentCreateScreen />} />
+              <Route path="/agenda/:id" element={<AppointmentDetailScreen />} />
+              <Route path="/agenda/:id/edit" element={<AppointmentEditScreen />} />
+              <Route path="/settings" element={<SettingsScreen />} />
             </Route>
           </Routes>
         </HashRouter>

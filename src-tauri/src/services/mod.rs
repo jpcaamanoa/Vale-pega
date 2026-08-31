@@ -2,5 +2,6 @@
 //! de bloqueo del vault — reciben una `&rusqlite::Connection` ya
 //! desbloqueada desde la capa de comandos.
 
+pub mod appointments;
 pub mod patients;
 pub mod rut;
