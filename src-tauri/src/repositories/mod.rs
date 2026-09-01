@@ -6,3 +6,5 @@
 pub mod app_settings;
 pub mod appointments;
 pub mod patients;
+pub mod session_notes;
+pub mod sessions;

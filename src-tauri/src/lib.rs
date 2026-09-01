@@ -85,6 +85,19 @@ pub fn run() {
       commands::select_google_calendar,
       commands::disconnect_google_calendar,
       commands::retry_appointment_sync,
+      commands::create_session,
+      commands::get_session,
+      commands::get_session_for_appointment,
+      commands::list_sessions,
+      commands::list_archived_sessions,
+      commands::update_session_metadata,
+      commands::archive_session,
+      commands::restore_session,
+      commands::get_current_note,
+      commands::list_note_history,
+      commands::autosave_note_draft,
+      commands::close_current_note,
+      commands::create_new_note_version,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

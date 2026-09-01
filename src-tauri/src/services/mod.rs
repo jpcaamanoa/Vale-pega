@@ -5,3 +5,4 @@
 pub mod appointments;
 pub mod patients;
 pub mod rut;
+pub mod sessions;

@@ -17,6 +17,8 @@ import { PatientCreateScreen } from './features/patients/PatientCreateScreen'
 import { PatientDetailScreen } from './features/patients/PatientDetailScreen'
 import { PatientEditScreen } from './features/patients/PatientEditScreen'
 import { PatientsListScreen } from './features/patients/PatientsListScreen'
+import { SessionCreateScreen } from './features/sessions/SessionCreateScreen'
+import { SessionDetailScreen } from './features/sessions/SessionDetailScreen'
 import { SettingsScreen } from './features/settings/SettingsScreen'
 
 type Screen =
@@ -105,6 +107,8 @@ function App() {
               <Route path="/patients/new" element={<PatientCreateScreen />} />
               <Route path="/patients/:id" element={<PatientDetailScreen />} />
               <Route path="/patients/:id/edit" element={<PatientEditScreen />} />
+              <Route path="/patients/:patientId/sessions/new" element={<SessionCreateScreen />} />
+              <Route path="/patients/:patientId/sessions/:sessionId" element={<SessionDetailScreen />} />
               <Route path="/agenda" element={<AgendaScreen />} />
               <Route path="/agenda/new" element={<AppointmentCreateScreen />} />
               <Route path="/agenda/:id" element={<AppointmentDetailScreen />} />

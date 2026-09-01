@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
+import { sessionsApi } from '../sessions/api'
+import type { Session } from '../sessions/types'
 import { agendaApi } from './api'
 import { formatLocalDateTime } from './datetime'
 import { SyncOutcomeBanner } from './SyncOutcomeBanner'
@@ -48,6 +50,8 @@ export function AppointmentDetailScreen() {
   const [confirmingArchive, setConfirmingArchive] = useState(false)
   const [confirmingRestore, setConfirmingRestore] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  // `undefined` = todavía no se consultó; `null` = no hay sesión asociada.
+  const [sessionForAppointment, setSessionForAppointment] = useState<Session | null | undefined>(undefined)
 
   const load = () => {
     if (!id) return
@@ -58,6 +62,17 @@ export function AppointmentDetailScreen() {
   }
 
   useEffect(load, [id])
+
+  useEffect(() => {
+    if (!id || !appointment?.patientId) {
+      setSessionForAppointment(null)
+      return
+    }
+    sessionsApi
+      .getForAppointment(id)
+      .then(setSessionForAppointment)
+      .catch(() => setSessionForAppointment(null))
+  }, [id, appointment?.patientId])
 
   const handleCancel = async () => {
     if (!id) return
@@ -201,6 +216,31 @@ export function AppointmentDetailScreen() {
             {retrying ? 'Sincronizando…' : 'Reintentar sincronización'}
           </Button>
         </div>
+
+        {appointment.patientId && (
+          <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
+            <span className="text-sm text-muted-foreground">Sesión clínica</span>
+            {sessionForAppointment === undefined ? (
+              <span className="text-sm text-muted-foreground">Cargando…</span>
+            ) : sessionForAppointment ? (
+              <Link
+                to={`/patients/${appointment.patientId}/sessions/${sessionForAppointment.id}`}
+                className="text-sm text-accent hover:underline"
+              >
+                Ver sesión
+              </Link>
+            ) : !isArchived ? (
+              <Button
+                variant="secondary"
+                onClick={() => navigate(`/patients/${appointment.patientId}/sessions/new?appointmentId=${id}`)}
+              >
+                Iniciar sesión
+              </Button>
+            ) : (
+              <span className="text-sm text-muted-foreground">—</span>
+            )}
+          </div>
+        )}
       </div>
 
       {confirmingCancel && (
