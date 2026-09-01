@@ -115,6 +115,9 @@ pub fn run() {
       commands::list_goals_for_session,
       commands::list_sessions_for_goal,
       commands::list_available_goals_for_session,
+      commands::get_clinical_profile,
+      commands::create_clinical_profile,
+      commands::update_clinical_profile,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

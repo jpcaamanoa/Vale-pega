@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
+import { ClinicalProfileTab } from '../clinical-profile/ClinicalProfileTab'
 import { GoalsTab } from '../goals/GoalsTab'
 import { SessionsTab } from '../sessions/SessionsTab'
 import { patientsApi } from './api'
@@ -32,8 +33,8 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 // Estas secciones se implementan en fases posteriores (formulación clínica,
 // evaluaciones, etc.) — la navegación ya está preparada para recibirlas sin
 // rehacer la ficha del paciente. "Sesiones" es real desde la Fase 4;
-// "Objetivos" es real desde la Fase 5.
-const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'sesiones', 'objetivos']
+// "Objetivos" es real desde la Fase 5; "Antecedentes" es real desde la Fase 6.
+const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'antecedentes', 'sesiones', 'objetivos']
 
 function SummaryRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
@@ -172,6 +173,7 @@ export function PatientDetailScreen() {
       {SECTIONS_WITH_REAL_CONTENT.includes(section) ? (
         <>
           {section === 'resumen' && <ResumenSection patient={patient} />}
+          {section === 'antecedentes' && id && <ClinicalProfileTab patientId={id} patientArchived={isArchived} />}
           {section === 'sesiones' && id && <SessionsTab patientId={id} patientArchived={isArchived} />}
           {section === 'objetivos' && id && <GoalsTab patientId={id} patientArchived={isArchived} />}
         </>

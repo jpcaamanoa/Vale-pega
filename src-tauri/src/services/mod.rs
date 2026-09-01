@@ -4,6 +4,7 @@
 
 pub mod appointments;
 pub mod goals;
+pub mod patient_clinical_profile;
 pub mod patients;
 pub mod rut;
 pub mod sessions;
