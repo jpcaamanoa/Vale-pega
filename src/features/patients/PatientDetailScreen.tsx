@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
+import { GoalsTab } from '../goals/GoalsTab'
 import { SessionsTab } from '../sessions/SessionsTab'
 import { patientsApi } from './api'
 import { PATIENT_STATUS_LABELS, type Patient } from './types'
@@ -30,8 +31,9 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 
 // Estas secciones se implementan en fases posteriores (formulación clínica,
 // evaluaciones, etc.) — la navegación ya está preparada para recibirlas sin
-// rehacer la ficha del paciente. "Sesiones" es real desde la Fase 4.
-const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'sesiones']
+// rehacer la ficha del paciente. "Sesiones" es real desde la Fase 4;
+// "Objetivos" es real desde la Fase 5.
+const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'sesiones', 'objetivos']
 
 function SummaryRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
@@ -171,6 +173,7 @@ export function PatientDetailScreen() {
         <>
           {section === 'resumen' && <ResumenSection patient={patient} />}
           {section === 'sesiones' && id && <SessionsTab patientId={id} patientArchived={isArchived} />}
+          {section === 'objetivos' && id && <GoalsTab patientId={id} patientArchived={isArchived} />}
         </>
       ) : (
         <p className="py-16 text-center text-sm text-muted-foreground">Próximamente.</p>

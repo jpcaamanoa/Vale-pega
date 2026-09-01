@@ -3,6 +3,7 @@
 //! desbloqueada desde la capa de comandos.
 
 pub mod appointments;
+pub mod goals;
 pub mod patients;
 pub mod rut;
 pub mod sessions;

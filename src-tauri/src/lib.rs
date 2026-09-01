@@ -98,6 +98,23 @@ pub fn run() {
       commands::autosave_note_draft,
       commands::close_current_note,
       commands::create_new_note_version,
+      commands::create_goal,
+      commands::get_goal,
+      commands::list_goals,
+      commands::list_archived_goals,
+      commands::update_goal,
+      commands::archive_goal,
+      commands::restore_goal,
+      commands::list_goal_indicators,
+      commands::create_goal_indicator,
+      commands::update_goal_indicator,
+      commands::delete_goal_indicator,
+      commands::link_session_goal,
+      commands::unlink_session_goal,
+      commands::update_session_goal_progress,
+      commands::list_goals_for_session,
+      commands::list_sessions_for_goal,
+      commands::list_available_goals_for_session,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

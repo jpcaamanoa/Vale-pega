@@ -5,6 +5,9 @@
 
 pub mod app_settings;
 pub mod appointments;
+pub mod goal_indicators;
+pub mod goals;
 pub mod patients;
+pub mod session_goals;
 pub mod session_notes;
 pub mod sessions;

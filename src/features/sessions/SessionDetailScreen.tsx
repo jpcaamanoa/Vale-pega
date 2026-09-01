@@ -1,11 +1,13 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
 import { Select } from '../../components/ui/Select'
 import { Textarea } from '../../components/ui/Textarea'
 import { TextField } from '../../components/ui/TextField'
+import { goalsApi } from '../goals/api'
+import { GOAL_STATUS_LABELS, type GoalListItem, type SessionGoalRow } from '../goals/types'
 import { sessionsApi } from './api'
 import { formatSessionDate } from './datetime'
 import { sessionMetadataFormSchema, type SessionMetadataFormValues } from './schema'
@@ -141,6 +143,180 @@ interface DraftFields {
 }
 
 const emptyDraft: DraftFields = { content: '', interventions: '', homeworkTasks: '', nextFocus: '' }
+
+/**
+ * "Objetivos trabajados en esta sesión" — el selector "Agregar objetivo"
+ * solo ofrece objetivos activos del paciente de esta sesión, ya filtrados
+ * en el backend (`list_available_goals_for_session`): nunca se calcula esa
+ * lista en el cliente, así que no hay forma de que aparezca un objetivo de
+ * otro paciente.
+ */
+function GoalsWorkedSection({ sessionId, patientId }: { sessionId: string; patientId: string }) {
+  const [linked, setLinked] = useState<SessionGoalRow[] | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
+  const [availableGoals, setAvailableGoals] = useState<GoalListItem[] | null>(null)
+  const [selectedGoalId, setSelectedGoalId] = useState('')
+  const [unlinking, setUnlinking] = useState<SessionGoalRow | null>(null)
+  const [editingProgressGoalId, setEditingProgressGoalId] = useState<string | null>(null)
+  const [progressDraft, setProgressDraft] = useState('')
+
+  const load = () => {
+    setLoading(true)
+    goalsApi
+      .listGoalsForSession(sessionId)
+      .then(setLinked)
+      .catch(() => setError('No se pudieron cargar los objetivos de esta sesión.'))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(load, [sessionId])
+
+  const openAdd = () => {
+    setAdding(true)
+    setSelectedGoalId('')
+    goalsApi.listAvailableGoalsForSession(sessionId).then(setAvailableGoals)
+  }
+
+  const handleAdd = async () => {
+    if (!selectedGoalId) return
+    try {
+      await goalsApi.linkSessionGoal({ sessionId, goalId: selectedGoalId })
+      setAdding(false)
+      load()
+    } catch (err) {
+      setError(typeof err === 'string' ? err : 'No se pudo vincular el objetivo.')
+    }
+  }
+
+  const handleUnlink = async () => {
+    if (!unlinking) return
+    try {
+      await goalsApi.unlinkSessionGoal(sessionId, unlinking.goalId)
+      setUnlinking(null)
+      load()
+    } catch (err) {
+      setError(typeof err === 'string' ? err : 'No se pudo quitar el objetivo.')
+    }
+  }
+
+  const saveProgress = async (goalId: string) => {
+    try {
+      await goalsApi.updateSessionGoalProgress(sessionId, goalId, progressDraft || null)
+      setEditingProgressGoalId(null)
+      load()
+    } catch (err) {
+      setError(typeof err === 'string' ? err : 'No se pudo guardar el progreso.')
+    }
+  }
+
+  return (
+    <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Objetivos trabajados en esta sesión</h3>
+        {!adding && (
+          <Button variant="secondary" onClick={openAdd}>
+            Agregar objetivo
+          </Button>
+        )}
+      </div>
+
+      {error && <p className="text-sm text-danger">{error}</p>}
+      {loading && <p className="text-sm text-muted-foreground">Cargando…</p>}
+
+      {!loading && linked && linked.length === 0 && !adding && (
+        <p className="py-4 text-center text-sm text-muted-foreground">Ningún objetivo vinculado a esta sesión todavía.</p>
+      )}
+
+      {!loading && linked && linked.length > 0 && (
+        <div className="flex flex-col gap-3">
+          {linked.map((row) => (
+            <div key={row.goalId} className="rounded-lg border border-border p-4">
+              <div className="flex items-center justify-between gap-4">
+                <Link to={`/patients/${patientId}/goals/${row.goalId}`} className="text-sm font-medium text-foreground hover:text-accent hover:underline">
+                  {row.goalTitle}
+                </Link>
+                <div className="flex shrink-0 items-center gap-3">
+                  <span className="text-xs text-muted-foreground">{GOAL_STATUS_LABELS[row.goalStatus]}</span>
+                  <button onClick={() => setUnlinking(row)} className="text-sm text-danger hover:underline">
+                    Quitar
+                  </button>
+                </div>
+              </div>
+              {editingProgressGoalId === row.goalId ? (
+                <div className="mt-3 flex flex-col gap-2">
+                  <Textarea label="Progreso" value={progressDraft} onChange={(e) => setProgressDraft(e.target.value)} />
+                  <div className="flex justify-end gap-2">
+                    <Button type="button" variant="secondary" onClick={() => setEditingProgressGoalId(null)}>
+                      Cancelar
+                    </Button>
+                    <Button type="button" onClick={() => saveProgress(row.goalId)}>
+                      Guardar progreso
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 flex items-start justify-between gap-3">
+                  <p className="text-sm text-muted-foreground">{row.progressNote?.trim() ? row.progressNote : 'Sin progreso registrado.'}</p>
+                  <button
+                    onClick={() => {
+                      setEditingProgressGoalId(row.goalId)
+                      setProgressDraft(row.progressNote ?? '')
+                    }}
+                    className="shrink-0 text-xs text-accent hover:underline"
+                  >
+                    Editar progreso
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {adding && (
+        <div className="flex flex-col gap-3 rounded-lg border border-border p-4">
+          {availableGoals === null ? (
+            <p className="text-sm text-muted-foreground">Cargando objetivos disponibles…</p>
+          ) : availableGoals.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No hay objetivos disponibles para vincular — ya están todos vinculados a esta sesión, o el paciente
+              todavía no tiene objetivos activos.
+            </p>
+          ) : (
+            <Select label="Objetivo" value={selectedGoalId} onChange={(e) => setSelectedGoalId(e.target.value)}>
+              <option value="">— Selecciona un objetivo —</option>
+              {availableGoals.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.title}
+                </option>
+              ))}
+            </Select>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="secondary" onClick={() => setAdding(false)}>
+              Cancelar
+            </Button>
+            <Button type="button" onClick={handleAdd} disabled={!selectedGoalId}>
+              Vincular
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {unlinking && (
+        <ConfirmDialog
+          title="Quitar objetivo de esta sesión"
+          description={`Se quitará el vínculo con "${unlinking.goalTitle}". El objetivo y su información en otras sesiones no se ven afectados.`}
+          confirmLabel="Quitar"
+          onDismiss={() => setUnlinking(null)}
+          onConfirm={handleUnlink}
+        />
+      )}
+    </section>
+  )
+}
 
 export function SessionDetailScreen() {
   const { patientId, sessionId } = useParams<{ patientId: string; sessionId: string }>()
@@ -396,6 +572,8 @@ export function SessionDetailScreen() {
           </div>
         )}
       </section>
+
+      <GoalsWorkedSection sessionId={session.id} patientId={session.patientId} />
 
       {confirmingArchive && (
         <ConfirmDialog

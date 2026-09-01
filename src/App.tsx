@@ -13,6 +13,8 @@ import type { VaultStatus } from './features/auth/types'
 import { UnlockScreen } from './features/auth/UnlockScreen'
 import { useRecordActivity } from './features/auth/useRecordActivity'
 import { DashboardScreen } from './features/dashboard/DashboardScreen'
+import { GoalCreateScreen } from './features/goals/GoalCreateScreen'
+import { GoalDetailScreen } from './features/goals/GoalDetailScreen'
 import { PatientCreateScreen } from './features/patients/PatientCreateScreen'
 import { PatientDetailScreen } from './features/patients/PatientDetailScreen'
 import { PatientEditScreen } from './features/patients/PatientEditScreen'
@@ -109,6 +111,8 @@ function App() {
               <Route path="/patients/:id/edit" element={<PatientEditScreen />} />
               <Route path="/patients/:patientId/sessions/new" element={<SessionCreateScreen />} />
               <Route path="/patients/:patientId/sessions/:sessionId" element={<SessionDetailScreen />} />
+              <Route path="/patients/:patientId/goals/new" element={<GoalCreateScreen />} />
+              <Route path="/patients/:patientId/goals/:goalId" element={<GoalDetailScreen />} />
               <Route path="/agenda" element={<AgendaScreen />} />
               <Route path="/agenda/new" element={<AppointmentCreateScreen />} />
               <Route path="/agenda/:id" element={<AppointmentDetailScreen />} />
