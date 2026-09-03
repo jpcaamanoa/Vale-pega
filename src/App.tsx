@@ -19,6 +19,8 @@ import { PatientCreateScreen } from './features/patients/PatientCreateScreen'
 import { PatientDetailScreen } from './features/patients/PatientDetailScreen'
 import { PatientEditScreen } from './features/patients/PatientEditScreen'
 import { PatientsListScreen } from './features/patients/PatientsListScreen'
+import { PaymentCreateScreen } from './features/payments/PaymentCreateScreen'
+import { PaymentDetailScreen } from './features/payments/PaymentDetailScreen'
 import { SessionCreateScreen } from './features/sessions/SessionCreateScreen'
 import { SessionDetailScreen } from './features/sessions/SessionDetailScreen'
 import { SettingsScreen } from './features/settings/SettingsScreen'
@@ -114,6 +116,8 @@ function App() {
               <Route path="/patients/:patientId/sessions/:sessionId" element={<SessionDetailScreen />} />
               <Route path="/patients/:patientId/goals/new" element={<GoalCreateScreen />} />
               <Route path="/patients/:patientId/goals/:goalId" element={<GoalDetailScreen />} />
+              <Route path="/patients/:patientId/payments/new" element={<PaymentCreateScreen />} />
+              <Route path="/patients/:patientId/payments/:paymentId" element={<PaymentDetailScreen />} />
               <Route path="/agenda" element={<AgendaScreen />} />
               <Route path="/agenda/new" element={<AppointmentCreateScreen />} />
               <Route path="/agenda/:id" element={<AppointmentDetailScreen />} />

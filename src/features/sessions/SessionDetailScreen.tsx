@@ -464,6 +464,9 @@ export function SessionDetailScreen() {
           </button>
         </div>
         <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => navigate(`/patients/${patientId}/payments/new`, { state: { sessionId } })}>
+            Registrar pago
+          </Button>
           {isArchived ? (
             <Button variant="secondary" onClick={() => setConfirmingRestore(true)}>
               Restaurar

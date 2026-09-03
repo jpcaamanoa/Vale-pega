@@ -120,6 +120,14 @@ pub fn run() {
       commands::get_clinical_profile,
       commands::create_clinical_profile,
       commands::update_clinical_profile,
+      commands::create_payment,
+      commands::get_payment,
+      commands::list_payments,
+      commands::list_archived_payments,
+      commands::update_payment,
+      commands::archive_payment,
+      commands::restore_payment,
+      commands::get_payment_dashboard_summary,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

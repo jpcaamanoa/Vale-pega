@@ -9,6 +9,7 @@ pub mod goal_indicators;
 pub mod goals;
 pub mod patient_clinical_profile;
 pub mod patients;
+pub mod payments;
 pub mod session_goals;
 pub mod session_notes;
 pub mod sessions;
