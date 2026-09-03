@@ -1,6 +1,7 @@
 mod calendar;
 mod commands;
 mod db;
+mod geo;
 mod repositories;
 mod security;
 mod services;
@@ -69,6 +70,7 @@ pub fn run() {
       commands::update_patient,
       commands::archive_patient,
       commands::restore_patient,
+      commands::get_geographic_statistics,
       commands::create_appointment,
       commands::get_appointment,
       commands::list_appointments,

@@ -1,9 +1,11 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import type { ReactNode } from 'react'
+import { useEffect, useRef } from 'react'
 import { useForm } from 'react-hook-form'
 import { Button } from '../../components/ui/Button'
 import { Select } from '../../components/ui/Select'
 import { TextField } from '../../components/ui/TextField'
+import { communesForRegion, EXTRANJERO, REGION_OPTIONS } from './geo'
 import { patientFormSchema, type PatientFormValues } from './schema'
 import { PATIENT_STATUS_LABELS, type Patient } from './types'
 
@@ -23,6 +25,8 @@ function patientToFormValues(patient?: Patient): Partial<PatientFormValues> {
     status: patient.status,
     referredBy: patient.referredBy ?? undefined,
     intakeDate: patient.intakeDate ?? undefined,
+    region: patient.region ?? undefined,
+    commune: patient.commune ?? undefined,
   }
 }
 
@@ -49,11 +53,27 @@ export function PatientForm({
   const {
     register,
     handleSubmit,
+    watch,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<PatientFormValues>({
     resolver: zodResolver(patientFormSchema),
     defaultValues: patientToFormValues(patient),
   })
+
+  const selectedRegion = watch('region')
+  const previousRegionRef = useRef(selectedRegion)
+  useEffect(() => {
+    // Solo limpia la comuna cuando el usuario cambia la región activamente
+    // — no en el primer render, para no perder la comuna ya guardada de un
+    // paciente existente al abrir el formulario de edición.
+    if (previousRegionRef.current !== selectedRegion) {
+      setValue('commune', '')
+      previousRegionRef.current = selectedRegion
+    }
+  }, [selectedRegion, setValue])
+  const communeOptions = communesForRegion(selectedRegion)
+  const communeDisabled = !selectedRegion || selectedRegion === EXTRANJERO
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-6">
@@ -70,6 +90,25 @@ export function PatientForm({
         <div className="sm:col-span-2">
           <TextField label="Dirección" {...register('address')} error={errors.address?.message} />
         </div>
+      </Section>
+
+      <Section title="Ubicación">
+        <Select label="Región" {...register('region')} error={errors.region?.message}>
+          <option value="">No informado</option>
+          {REGION_OPTIONS.map((region) => (
+            <option key={region} value={region}>
+              {region}
+            </option>
+          ))}
+        </Select>
+        <Select label="Comuna" {...register('commune')} error={errors.commune?.message} disabled={communeDisabled}>
+          <option value="">{selectedRegion === EXTRANJERO ? 'No aplica' : 'No informado'}</option>
+          {communeOptions.map((commune) => (
+            <option key={commune} value={commune}>
+              {commune}
+            </option>
+          ))}
+        </Select>
       </Section>
 
       <Section title="Contacto de emergencia">

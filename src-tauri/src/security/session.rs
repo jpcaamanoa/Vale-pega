@@ -378,6 +378,8 @@ mod tests {
                 status: None,
                 referred_by: None,
                 intake_date: None,
+                region: None,
+                commune: None,
             }
         }
 
@@ -454,6 +456,8 @@ mod tests {
                 status: None,
                 referred_by: None,
                 intake_date: None,
+                region: None,
+                commune: None,
             };
             patient_id = session
                 .with_connection(|conn| patients::create_patient(conn, input))

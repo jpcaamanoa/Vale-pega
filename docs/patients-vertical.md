@@ -307,3 +307,17 @@ modelo de base de datos, dependencias nuevas, envío de información fuera
 del dispositivo, ni modificación de una decisión previamente aprobada —
 `list_deleted`/`list_archived_patients` son una consulta adicional sobre el
 mismo esquema y las mismas capas ya existentes.
+
+---
+
+## Fase 6.1 — Ubicación geográfica y estadísticas de pacientes (3 de septiembre de 2026)
+
+Extensión pequeña y aislada de esta misma vertical: `Patient`/`PatientInput`
+ganan dos campos opcionales, `region` y `commune`, validados en
+`services::patients::validate_geo` contra un catálogo cerrado de Chile.
+Documentación técnica completa (catálogo, migración `V2`, validación, la
+nueva pantalla "Estadísticas", la excepción mecánica de compatibilidad de
+tests) en `docs/geographic-stats.md` — este archivo solo deja constancia de
+que la extensión existe y de que **`PatientListItem` (el listado) no se
+tocó**: sigue sin RUT (Fase 1.5) y ahora tampoco lleva región/comuna, por el
+mismo principio de minimización de exposición ya documentado arriba.

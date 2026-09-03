@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::security::VaultSession;
-use crate::services::patients::{self, PatientInput, PatientListItem};
+use crate::services::patients::{self, GeographicStatistics, PatientInput, PatientListItem};
 use crate::repositories::patients::Patient;
 
 type SharedVaultSession = Arc<VaultSession>;
@@ -87,6 +87,22 @@ pub fn archive_patient(id: String, state: State<'_, SharedVaultSession>) -> Resu
 pub fn restore_patient(id: String, state: State<'_, SharedVaultSession>) -> Result<(), String> {
     state
         .with_connection(|conn| patients::restore_patient(conn, &id))
+        .map_err(|_| LOCKED_MESSAGE.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Estadísticas geográficas agregadas (Fase 6.1) para la pantalla
+/// "Estadísticas". `include_archived = false` (por defecto en el frontend)
+/// muestra solo pacientes activos; `true` incluye también los archivados.
+/// La respuesta nunca contiene datos de un paciente individual — ver
+/// `services::patients::GeographicStatistics`.
+#[tauri::command]
+pub fn get_geographic_statistics(
+    include_archived: bool,
+    state: State<'_, SharedVaultSession>,
+) -> Result<GeographicStatistics, String> {
+    state
+        .with_connection(|conn| patients::geographic_statistics(conn, include_archived))
         .map_err(|_| LOCKED_MESSAGE.to_string())?
         .map_err(|e| e.to_string())
 }

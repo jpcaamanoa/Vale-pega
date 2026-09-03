@@ -26,6 +26,11 @@ export const patientFormSchema = z.object({
   status: z.enum(['activo', 'inactivo', 'alta', 'archivado']),
   referredBy: optionalText,
   intakeDate: dateField,
+  // El valor siempre viene de un <Select> con el catálogo cerrado (nunca
+  // texto libre) — Zod no necesita repetir esa validación, la autoritativa
+  // vive en el backend (services::patients::validate_geo).
+  region: optionalText,
+  commune: optionalText,
 })
 
 export type PatientFormValues = z.infer<typeof patientFormSchema>

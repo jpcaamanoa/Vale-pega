@@ -110,6 +110,8 @@ mod tests {
                 status: "activo",
                 referred_by: None,
                 intake_date: None,
+                region: None,
+                commune: None,
             },
         )
         .unwrap();

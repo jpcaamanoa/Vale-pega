@@ -60,6 +60,8 @@ function ResumenSection({ patient }: { patient: Patient }) {
         <SummaryRow label="Teléfono" value={patient.phone} />
         <SummaryRow label="Correo" value={patient.email} />
         <SummaryRow label="Dirección" value={patient.address} />
+        <SummaryRow label="Región" value={patient.region} />
+        <SummaryRow label="Comuna" value={patient.commune} />
       </div>
       <div>
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Contacto de emergencia</h3>

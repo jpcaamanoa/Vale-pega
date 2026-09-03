@@ -22,6 +22,7 @@ import { PatientsListScreen } from './features/patients/PatientsListScreen'
 import { SessionCreateScreen } from './features/sessions/SessionCreateScreen'
 import { SessionDetailScreen } from './features/sessions/SessionDetailScreen'
 import { SettingsScreen } from './features/settings/SettingsScreen'
+import { StatisticsScreen } from './features/statistics/StatisticsScreen'
 
 type Screen =
   | { kind: 'loading' }
@@ -117,6 +118,7 @@ function App() {
               <Route path="/agenda/new" element={<AppointmentCreateScreen />} />
               <Route path="/agenda/:id" element={<AppointmentDetailScreen />} />
               <Route path="/agenda/:id/edit" element={<AppointmentEditScreen />} />
+              <Route path="/statistics" element={<StatisticsScreen />} />
               <Route path="/settings" element={<SettingsScreen />} />
             </Route>
           </Routes>

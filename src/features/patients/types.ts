@@ -16,6 +16,11 @@ export interface Patient {
   status: PatientStatus
   referredBy: string | null
   intakeDate: string | null
+  /** Nombre exacto de una región del catálogo cerrado, o "Extranjero", o
+   * `null` ("no informado"). Ver `./geo.ts`. */
+  region: string | null
+  /** Comuna de residencia, siempre `null` si `region` es "Extranjero" o `null`. */
+  commune: string | null
   createdAt: string
   updatedAt: string
   deletedAt: string | null
@@ -44,6 +49,8 @@ export interface PatientInput {
   status?: PatientStatus | null
   referredBy?: string | null
   intakeDate?: string | null
+  region?: string | null
+  commune?: string | null
 }
 
 export const PATIENT_STATUS_LABELS: Record<PatientStatus, string> = {

@@ -459,6 +459,8 @@ mod tests {
             status: None,
             referred_by: None,
             intake_date: None,
+            region: None,
+            commune: None,
         };
         patients::create_patient(conn, input).unwrap().id
     }

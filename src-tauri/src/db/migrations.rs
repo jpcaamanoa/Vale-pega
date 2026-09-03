@@ -484,11 +484,29 @@ BEGIN
 END;
 "#;
 
+/// V2 (Fase 6.1): ubicación geográfica general del paciente. Puramente
+/// aditiva — dos columnas nullable sobre `patients`, sin `DEFAULT`
+/// obligatorio y sin backfill. Todo paciente creado bajo V1 queda con
+/// `region = NULL, commune = NULL` tras aplicar esta migración, sin error y
+/// sin perder ningún dato existente (ver
+/// `region_and_commune_are_null_for_patients_created_before_v2` y
+/// `v2_migration_preserves_all_existing_patient_data`).
+///
+/// Deliberadamente NO se agregan aquí: tablas `regions`/`communes`, FK
+/// geográficas, ni un `CHECK` de comuna — la validación del catálogo
+/// (región válida, comuna perteneciente a esa región) vive en
+/// `services::patients`, no en el esquema. Ver `src-tauri/src/geo.rs` y
+/// `docs/geographic-stats.md`.
+const SCHEMA_V2: &str = r#"
+ALTER TABLE patients ADD COLUMN region TEXT;
+ALTER TABLE patients ADD COLUMN commune TEXT;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(SCHEMA_V1).foreign_key_check()])
+    Migrations::new(vec![M::up(SCHEMA_V1).foreign_key_check(), M::up(SCHEMA_V2).foreign_key_check()])
 }
 
 /// Lleva `conn` al esquema más reciente, creándolo desde cero si es una base
@@ -589,6 +607,100 @@ mod tests {
             .query_row("SELECT full_name FROM patients WHERE id = 'p1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "Paciente Idempotencia");
+    }
+
+    // ---------------------------------------------------------------
+    // 2b (Fase 6.1): migración V2 — region/commune — es aditiva y no
+    // destructiva sobre un vault V1 real con pacientes ya insertados.
+    // ---------------------------------------------------------------
+    #[test]
+    fn v2_migration_preserves_all_existing_patient_data() {
+        let path = temp_db_path("v2-preserves-data");
+        let k = key(0xE1);
+
+        // 1. Llevar un vault únicamente a V1 — simula el estado real de un
+        //    vault creado antes de Fase 6.1, con pacientes ficticios ya
+        //    cargados y todos sus campos completos.
+        {
+            let mut conn = open_vault(&path, &k).unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            Migrations::new(vec![M::up(SCHEMA_V1).foreign_key_check()]).to_latest(&mut conn).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+            conn.execute(
+                "INSERT INTO patients (id, full_name, preferred_name, rut, birth_date, phone, email, address, status)
+                 VALUES ('p1', 'Paciente Ficticio Uno', 'Uno', '11111111-1', '1990-01-01', '+56900000001',
+                         'uno@ejemplo.test', 'Calle Falsa 123', 'activo')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO patients (id, full_name, status) VALUES ('p2', 'Paciente Ficticio Dos', 'archivado')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 2. Reabrir y aplicar el mecanismo normal de migraciones (V1+V2) —
+        //    exactamente lo que hace la app en cada arranque real.
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).expect("V2 debe aplicarse limpiamente sobre un vault V1 con datos reales");
+
+        // 3. Ambos pacientes siguen existiendo con TODOS sus campos
+        //    antiguos intactos, y las columnas nuevas quedan en NULL sin
+        //    error ni valor inventado.
+        let (name, rut, address, region, commune): (String, Option<String>, Option<String>, Option<String>, Option<String>) = conn
+            .query_row("SELECT full_name, rut, address, region, commune FROM patients WHERE id = 'p1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap();
+        assert_eq!(name, "Paciente Ficticio Uno");
+        assert_eq!(rut.as_deref(), Some("11111111-1"));
+        assert_eq!(address.as_deref(), Some("Calle Falsa 123"));
+        assert_eq!(region, None, "un paciente creado antes de V2 debe quedar con region = NULL");
+        assert_eq!(commune, None, "un paciente creado antes de V2 debe quedar con commune = NULL");
+
+        let status: String = conn.query_row("SELECT status FROM patients WHERE id = 'p2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "archivado", "el segundo paciente ficticio también sobrevive intacto");
+
+        // 4. La aplicación sigue funcionando después: se puede editar el
+        //    paciente, incluyendo las columnas nuevas, con un UPDATE normal.
+        conn.execute(
+            "UPDATE patients SET region = 'Región Metropolitana de Santiago', commune = 'Ñuñoa' WHERE id = 'p1'",
+            [],
+        )
+        .unwrap();
+        let (region2, commune2): (Option<String>, Option<String>) = conn
+            .query_row("SELECT region, commune FROM patients WHERE id = 'p1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(region2.as_deref(), Some("Región Metropolitana de Santiago"));
+        assert_eq!(commune2.as_deref(), Some("Ñuñoa"));
+    }
+
+    #[test]
+    fn fresh_database_gets_region_and_commune_columns_from_v1_plus_v2() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v2-columns");
+        let mut stmt = conn.prepare("PRAGMA table_info(patients)").unwrap();
+        let columns: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(columns.contains(&"region".to_string()), "una base nueva debe tener la columna region desde el arranque");
+        assert!(columns.contains(&"commune".to_string()), "una base nueva debe tener la columna commune desde el arranque");
+    }
+
+    #[test]
+    fn v2_migration_is_idempotent_like_v1() {
+        let path = temp_db_path("v2-idempotent");
+        let k = key(0xE2);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name, region) VALUES ('p1', 'X', 'Región de Valparaíso')", [])
+            .unwrap();
+
+        // Reaplicar migraciones (como en cada arranque) no debe fallar ni
+        // intentar re-agregar las columnas de V2 sobre sí mismas.
+        run_migrations(&mut conn).expect("reaplicar V1+V2 ya vigentes no debería fallar");
+
+        let region: Option<String> = conn.query_row("SELECT region FROM patients WHERE id = 'p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(region.as_deref(), Some("Región de Valparaíso"));
     }
 
     // ---------------------------------------------------------------
