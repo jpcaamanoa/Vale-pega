@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
 import { sessionsApi } from './api'
 import { formatSessionDate } from './datetime'
+import { SessionContinuityPanel } from './SessionContinuityPanel'
 import { SESSION_MODALITY_LABELS, SESSION_STATUS_LABELS, type SessionListItem } from './types'
 
 type ViewMode = 'active' | 'archived'
@@ -45,7 +46,9 @@ export function SessionsTab({ patientId, patientArchived }: { patientId: string;
   const canCreate = !patientArchived
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-6">
+      <SessionContinuityPanel patientId={patientId} patientArchived={patientArchived} />
+
       <div className="flex items-center justify-between">
         <div className="flex gap-1 border-b border-border">
           <button

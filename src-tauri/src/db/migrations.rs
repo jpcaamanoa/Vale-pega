@@ -502,11 +502,100 @@ ALTER TABLE patients ADD COLUMN region TEXT;
 ALTER TABLE patients ADD COLUMN commune TEXT;
 "#;
 
+/// V3 (Fase 8): continuidad entre sesiones — dos tablas nuevas,
+/// completamente aditivas, sin tocar ninguna tabla de V1/V2. Ver
+/// `docs/session-continuity.md` para el diseño completo.
+///
+/// `session_notes.next_focus`/`homework_tasks` (V1) no se tocan ni se
+/// reinterpretan: siguen siendo texto histórico dentro de una nota
+/// versionada e inmutable una vez cerrada. Las dos tablas de aquí son
+/// **operativas**, con su propio ciclo de vida, independientes de cualquier
+/// nota concreta — ver la nota de diseño en `docs/session-continuity.md`
+/// sobre por qué no bastaba con esos dos campos.
+///
+/// `patient_prep_notes`: "quiero acordarme de esto la próxima vez que vea a
+/// este paciente". Deliberadamente **sin `deleted_at`** — a diferencia de
+/// therapeutic_goals/payments/sessions, el ciclo de vida completo de esta
+/// entidad ya queda representado por el propio `status`
+/// (`pendiente`/`abordado`/`descartado`, ninguno de los tres oculta la fila
+/// de ningún listado permanentemente): no hay ningún caso de uso de "ocultar
+/// esta fila de todos lados sin perder el dato" distinto de simplemente
+/// marcarla `descartado`, así que agregar soft-delete encima sería un
+/// segundo mecanismo redundante para el mismo propósito. `origin_session_id`
+/// es opcional a propósito (regla 7 de la aprobación de Fase 8): una
+/// preparación nunca depende de que exista una cita futura agendada.
+///
+/// `therapy_tasks`: entidad con ciclo de vida propio, distinta de
+/// `reminders` (que no se implementa en esta fase) — una tarea terapéutica
+/// pertenece al proceso clínico, no es una alerta temporal genérica. Cinco
+/// estados: `pendiente`/`parcial`/`realizada`/`no_realizada` (los cuatro
+/// pedidos explícitamente) más `descartada` (agregado, justificado en
+/// `docs/session-continuity.md`: cubre una tarea que deja de ser relevante
+/// *antes* de llegar a revisarse en ninguna sesión — un caso distinto de
+/// `no_realizada`, que sí implica que hubo una revisión con resultado
+/// negativo). `goal_id` es opcional y usa `ON DELETE SET NULL` — igual
+/// patrón que `payments.session_id`/`therapeutic_goals.formulation_id` — y
+/// nunca se activa en la práctica porque los objetivos solo se archivan
+/// (soft delete), nunca se borran físicamente: una tarea vinculada a un
+/// objetivo archivado conserva el vínculo intacto. `deleted_at` sí existe
+/// aquí (a diferencia de `patient_prep_notes`): archivar una tarea es un
+/// acto administrativo distinto de cualquiera de sus cinco estados
+/// clínicos, mismo criterio que separar `archived`/`status` en Objetivos y
+/// Pagos.
+const SCHEMA_V3: &str = r#"
+CREATE TABLE patient_prep_notes (
+  id TEXT PRIMARY KEY,
+  patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
+  origin_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pendiente'
+    CHECK (status IN ('pendiente','abordado','descartado')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_patient_prep_notes_patient_status ON patient_prep_notes(patient_id, status);
+CREATE TRIGGER trg_patient_prep_notes_touch_updated_at
+AFTER UPDATE ON patient_prep_notes
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE patient_prep_notes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+
+CREATE TABLE therapy_tasks (
+  id TEXT PRIMARY KEY,
+  patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
+  assigned_in_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  goal_id TEXT REFERENCES therapeutic_goals(id) ON DELETE SET NULL,
+  description TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pendiente'
+    CHECK (status IN ('pendiente','parcial','realizada','no_realizada','descartada')),
+  assigned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  review_due_at TEXT,
+  reviewed_in_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  reviewed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  deleted_at TEXT
+);
+CREATE INDEX idx_therapy_tasks_patient_status ON therapy_tasks(patient_id, status);
+CREATE INDEX idx_therapy_tasks_goal ON therapy_tasks(goal_id);
+CREATE TRIGGER trg_therapy_tasks_touch_updated_at
+AFTER UPDATE ON therapy_tasks
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE therapy_tasks SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(SCHEMA_V1).foreign_key_check(), M::up(SCHEMA_V2).foreign_key_check()])
+    Migrations::new(vec![
+        M::up(SCHEMA_V1).foreign_key_check(),
+        M::up(SCHEMA_V2).foreign_key_check(),
+        M::up(SCHEMA_V3).foreign_key_check(),
+    ])
 }
 
 /// Lleva `conn` al esquema más reciente, creándolo desde cero si es una base
@@ -556,6 +645,8 @@ mod tests {
         "library_resource_tags",
         "reminders",
         "app_settings",
+        "patient_prep_notes",
+        "therapy_tasks",
     ];
 
     fn migrated_vault(name: &str) -> (rusqlite::Connection, std::path::PathBuf, VaultKey) {
@@ -701,6 +792,127 @@ mod tests {
 
         let region: Option<String> = conn.query_row("SELECT region FROM patients WHERE id = 'p1'", [], |r| r.get(0)).unwrap();
         assert_eq!(region.as_deref(), Some("Región de Valparaíso"));
+    }
+
+    // ---------------------------------------------------------------
+    // 2c (Fase 8): migración V3 — patient_prep_notes/therapy_tasks — es
+    // aditiva y no destructiva sobre un vault V1+V2 real con datos ya
+    // insertados.
+    // ---------------------------------------------------------------
+    #[test]
+    fn v3_migration_preserves_all_existing_data() {
+        let path = temp_db_path("v3-preserves-data");
+        let k = key(0xE3);
+
+        // 1. Llevar un vault a V1+V2 — simula el estado real de un vault
+        //    creado antes de Fase 8, con un paciente, una sesión y un
+        //    objetivo ya cargados.
+        {
+            let mut conn = open_vault(&path, &k).unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            Migrations::new(vec![M::up(SCHEMA_V1).foreign_key_check(), M::up(SCHEMA_V2).foreign_key_check()])
+                .to_latest(&mut conn)
+                .unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+            conn.execute("INSERT INTO patients (id, full_name, status) VALUES ('p1', 'Paciente Ficticio Uno', 'activo')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, patient_id, session_date) VALUES ('s1', 'p1', '2026-01-01')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO therapeutic_goals (id, patient_id, title) VALUES ('g1', 'p1', 'Objetivo previo a Fase 8')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 2. Reabrir y aplicar el mecanismo normal de migraciones
+        //    (V1+V2+V3) — exactamente lo que hace la app en cada arranque.
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).expect("V3 debe aplicarse limpiamente sobre un vault V1+V2 con datos reales");
+
+        // 3. El paciente, la sesión y el objetivo siguen intactos.
+        let name: String = conn.query_row("SELECT full_name FROM patients WHERE id = 'p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Paciente Ficticio Uno");
+        let session_date: String = conn.query_row("SELECT session_date FROM sessions WHERE id = 's1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(session_date, "2026-01-01");
+        let goal_title: String =
+            conn.query_row("SELECT title FROM therapeutic_goals WHERE id = 'g1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(goal_title, "Objetivo previo a Fase 8");
+
+        // 4. Las tablas nuevas existen y aceptan datos reales, referenciando
+        //    el paciente/sesión/objetivo que ya existían antes de V3.
+        conn.execute(
+            "INSERT INTO patient_prep_notes (id, patient_id, origin_session_id, content) VALUES ('pn1', 'p1', 's1', 'Retomar exposición')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO therapy_tasks (id, patient_id, assigned_in_session_id, goal_id, description) \
+             VALUES ('t1', 'p1', 's1', 'g1', 'Registro de pensamientos')",
+            [],
+        )
+        .unwrap();
+        let prep_status: String = conn.query_row("SELECT status FROM patient_prep_notes WHERE id = 'pn1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(prep_status, "pendiente", "el estado por defecto de una preparación nueva es 'pendiente'");
+        let task_status: String = conn.query_row("SELECT status FROM therapy_tasks WHERE id = 't1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(task_status, "pendiente", "el estado por defecto de una tarea nueva es 'pendiente'");
+    }
+
+    #[test]
+    fn fresh_database_has_v3_tables() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v3-tables");
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('patient_prep_notes', 'therapy_tasks')")
+            .unwrap();
+        let names: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|n| n.unwrap()).collect();
+        assert_eq!(names.len(), 2, "una base nueva debe tener ambas tablas de Fase 8 desde el arranque");
+    }
+
+    #[test]
+    fn v3_migration_is_idempotent() {
+        let path = temp_db_path("v3-idempotent");
+        let k = key(0xE4);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO patient_prep_notes (id, patient_id, content) VALUES ('pn1', 'p1', 'Nota')", []).unwrap();
+
+        // Reaplicar migraciones (como en cada arranque) no debe fallar ni
+        // intentar recrear las tablas de V3 sobre sí mismas.
+        run_migrations(&mut conn).expect("reaplicar V1+V2+V3 ya vigentes no debería fallar");
+
+        let content: String = conn.query_row("SELECT content FROM patient_prep_notes WHERE id = 'pn1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(content, "Nota");
+    }
+
+    #[test]
+    fn therapy_task_rejects_invalid_status() {
+        let (conn, _path, _key) = migrated_vault("v3-task-invalid-status");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO therapy_tasks (id, patient_id, description, status) VALUES ('t1', 'p1', 'Tarea', 'inventado')",
+                [],
+            )
+            .expect_err("un estado fuera del CHECK debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    #[test]
+    fn patient_prep_note_rejects_invalid_status() {
+        let (conn, _path, _key) = migrated_vault("v3-prep-invalid-status");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO patient_prep_notes (id, patient_id, content, status) VALUES ('pn1', 'p1', 'Nota', 'inventado')",
+                [],
+            )
+            .expect_err("un estado fuera del CHECK debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
     }
 
     // ---------------------------------------------------------------

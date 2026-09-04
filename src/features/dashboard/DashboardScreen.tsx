@@ -7,7 +7,8 @@ import { patientsApi } from '../patients/api'
 import { paymentsApi } from '../payments/api'
 import { formatClp } from '../payments/formatCurrency'
 import type { PaymentDashboardSummary } from '../payments/types'
-import { ComingSoonCard } from './ComingSoonCard'
+import { sessionsApi } from '../sessions/api'
+import { therapyTasksApi } from '../therapy-tasks/api'
 
 /**
  * Bloque "Hoy" real (Fase 3): citas activas cuyo horario se superpone con el
@@ -75,18 +76,19 @@ function TodayCard() {
 }
 
 /**
- * Pantalla de inicio real de la aplicación (Fase 2, extendida en Fases 3 y
- * 7). Sección "Resumen" consume `patientsApi.list()` — el mismo comando de
- * la Fase 1.5, sin cambios de backend — para mostrar un conteo real de
- * pacientes activos, y `paymentsApi.dashboardSummary()` (Fase 7) para
- * "Ingresos del mes" y "Pagos pendientes" — dos agregados administrativos
- * calculados enteramente en el backend, nunca una lista de pagos ni de
- * pacientes traída aquí para sumarla a mano. El bloque "Hoy" (Fase 3)
- * consume `agendaApi.list()` con el rango del día en hora local.
- * "Pendientes" (tarjeta genérica, distinta de "Pagos pendientes") y
- * "Sesiones del mes" (pertenece a la vertical Sesiones, fuera de alcance
- * de Fase 7) se muestran como `ComingSoonCard`/"Próximamente" — nunca un
- * número inventado.
+ * Pantalla de inicio real de la aplicación (Fase 2, extendida en Fases 3, 7
+ * y 8). Sección "Resumen" consume `patientsApi.list()` — el mismo comando de
+ * la Fase 1.5, sin cambios de backend —, `paymentsApi.dashboardSummary()`
+ * (Fase 7) para "Ingresos del mes"/"Pagos pendientes", y
+ * `sessionsApi.thisMonthCount()` (Fase 8) para "Sesiones del mes" — todos
+ * agregados administrativos calculados enteramente en el backend, nunca una
+ * lista traída aquí para sumarla a mano. El bloque "Hoy" (Fase 3) consume
+ * `agendaApi.list()` con el rango del día en hora local. "Pendientes"
+ * ahora muestra el conteo real de tareas terapéuticas pendientes
+ * (`therapyTasksApi.pendingCount()`, Fase 8) — sigue sin mostrar notas sin
+ * cerrar ni documentos pendientes, porque Documentos no existe todavía como
+ * funcionalidad: ese texto permanece explícitamente "Próximamente", nunca
+ * un número inventado.
  */
 export function DashboardScreen() {
   const navigate = useNavigate()
@@ -95,6 +97,8 @@ export function DashboardScreen() {
   const [error, setError] = useState<string | null>(null)
   const [paymentSummary, setPaymentSummary] = useState<PaymentDashboardSummary | null>(null)
   const [paymentSummaryError, setPaymentSummaryError] = useState<string | null>(null)
+  const [sessionsThisMonth, setSessionsThisMonth] = useState<number | null>(null)
+  const [pendingTaskCount, setPendingTaskCount] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -135,6 +139,26 @@ export function DashboardScreen() {
     }
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+    sessionsApi.thisMonthCount().then((count) => {
+      if (!cancelled) setSessionsThisMonth(count)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    therapyTasksApi.pendingCount().then((count) => {
+      if (!cancelled) setPendingTaskCount(count)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-10">
       <h1 className="text-xl font-semibold text-foreground">Inicio</h1>
@@ -144,10 +168,16 @@ export function DashboardScreen() {
       <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
         <TodayCard />
 
-        <ComingSoonCard
-          title="Pendientes"
-          description="Aquí verás notas sin cerrar, tareas clínicas y documentos pendientes, cuando existan esas funcionalidades."
-        />
+        <section className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-6">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Pendientes</h3>
+          <div className="flex items-center justify-between rounded-lg border border-border p-4">
+            <span className="text-sm text-foreground">Tareas clínicas pendientes</span>
+            <span className="text-2xl font-semibold text-accent">{pendingTaskCount ?? '—'}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Notas sin cerrar y documentos pendientes se sumarán aquí cuando existan esas funcionalidades.
+          </p>
+        </section>
 
         <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
           <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Resumen</h3>
@@ -162,9 +192,7 @@ export function DashboardScreen() {
 
           <div className="flex items-center justify-between rounded-lg border border-border p-4">
             <span className="text-sm text-foreground">Sesiones del mes</span>
-            <span className="rounded-full bg-disabled px-2 py-0.5 text-xs font-medium text-disabled-foreground">
-              Próximamente
-            </span>
+            <span className="text-2xl font-semibold text-accent">{sessionsThisMonth ?? '—'}</span>
           </div>
 
           <div className="flex items-center justify-between rounded-lg border border-border p-4">

@@ -5,7 +5,9 @@
 pub mod appointments;
 pub mod goals;
 pub mod patient_clinical_profile;
+pub mod patient_prep_notes;
 pub mod patients;
 pub mod payments;
 pub mod rut;
 pub mod sessions;
+pub mod therapy_tasks;

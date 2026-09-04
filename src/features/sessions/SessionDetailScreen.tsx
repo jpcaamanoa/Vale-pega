@@ -11,6 +11,7 @@ import { GOAL_STATUS_LABELS, type GoalListItem, type SessionGoalRow } from '../g
 import { sessionsApi } from './api'
 import { formatSessionDate } from './datetime'
 import { sessionMetadataFormSchema, type SessionMetadataFormValues } from './schema'
+import { SessionContinuityPanel } from './SessionContinuityPanel'
 import { SESSION_MODALITY_LABELS, SESSION_STATUS_LABELS, type Session, type SessionMetadataInput, type SessionNote } from './types'
 
 const AUTOSAVE_DEBOUNCE_MS = 800
@@ -478,6 +479,13 @@ export function SessionDetailScreen() {
           )}
         </div>
       </div>
+
+      {/* `patientArchived={false}`: igual criterio que el botón "Registrar
+          pago" de arriba — la autoridad real vive en el backend
+          (PatientArchived se muestra como error si corresponde), esta
+          pantalla no vuelve a consultar el estado del paciente solo para
+          decidir si mostrar el botón "Agregar". */}
+      <SessionContinuityPanel patientId={session.patientId} sessionId={session.id} patientArchived={false} />
 
       <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
         <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Información de la sesión</h3>

@@ -146,3 +146,10 @@ pub fn create_new_note_version(session_id: String, state: State<'_, SharedVaultS
         .map_err(|_| LOCKED_MESSAGE.to_string())?
         .map_err(|e| e.to_string())
 }
+
+/// Conteo global de sesiones del mes actual — para el bloque "Resumen" del
+/// Dashboard (Fase 8). Nunca una lista de sesiones individuales.
+#[tauri::command]
+pub fn get_sessions_this_month_count(state: State<'_, SharedVaultSession>) -> Result<i64, String> {
+    state.with_connection(sessions::sessions_this_month_count).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
+}

@@ -37,4 +37,7 @@ export const sessionsApi = {
   closeCurrentNote: (sessionId: string) => invoke<SessionNote>('close_current_note', { sessionId }),
 
   createNewNoteVersion: (sessionId: string) => invoke<SessionNote>('create_new_note_version', { sessionId }),
+
+  /** Conteo global — para el bloque "Resumen" del Dashboard (Fase 8). */
+  thisMonthCount: () => invoke<number>('get_sessions_this_month_count'),
 }

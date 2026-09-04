@@ -182,6 +182,21 @@ pub fn restore(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     Ok(affected > 0)
 }
 
+/// Conteo global de sesiones cuya `session_date` cae en el mes calendario
+/// actual (`strftime('%Y-%m', session_date) = strftime('%Y-%m', date('now'))`,
+/// UTC — misma limitación ya aceptada en `services::payments`), excluyendo
+/// canceladas y archivadas. Para el bloque "Resumen" del Dashboard (Fase 8,
+/// cierre pequeño de coherencia con "Ingresos del mes"/"Pagos pendientes").
+pub fn count_this_month(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sessions \
+         WHERE deleted_at IS NULL AND status != 'cancelada' \
+         AND strftime('%Y-%m', session_date) = strftime('%Y-%m', date('now'))",
+        [],
+        |r| r.get(0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +240,32 @@ mod tests {
         )
         .unwrap();
         id
+    }
+
+    #[test]
+    fn count_this_month_counts_non_cancelled_sessions_in_the_current_month() {
+        let conn = test_conn("count-this-month");
+        let patient_id = create_test_patient(&conn, "Paciente Conteo");
+        let today: String = conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0)).unwrap();
+
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s2", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "realizada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s3", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "cancelada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s4", patient_id: &patient_id, appointment_id: None, session_date: "2020-01-01", start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+
+        assert_eq!(count_this_month(&conn).unwrap(), 2, "excluye la cancelada y la de otro mes/año");
+    }
+
+    #[test]
+    fn count_this_month_excludes_archived_sessions() {
+        let conn = test_conn("count-this-month-archived");
+        let patient_id = create_test_patient(&conn, "Paciente Conteo Archivadas");
+        let today: String = conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0)).unwrap();
+
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+        soft_delete(&conn, "s1").unwrap();
+
+        assert_eq!(count_this_month(&conn).unwrap(), 0);
     }
 
     #[test]

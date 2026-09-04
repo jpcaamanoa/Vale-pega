@@ -331,6 +331,12 @@ pub fn restore_session(conn: &Connection, id: &str) -> Result<Session, SessionEr
     }
 }
 
+/// Conteo global de sesiones del mes actual, para el bloque "Resumen" del
+/// Dashboard (Fase 8).
+pub fn sessions_this_month_count(conn: &Connection) -> Result<i64, SessionError> {
+    Ok(sessions::count_this_month(conn)?)
+}
+
 pub fn get_current_note(conn: &Connection, session_id: &str) -> Result<SessionNote, SessionError> {
     session_notes::find_current(conn, session_id)?.ok_or(SessionError::NoteNotFound)
 }
