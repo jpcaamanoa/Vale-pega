@@ -412,6 +412,7 @@ mod tests {
         let input = SessionInput {
             patient_id: patient_id.to_string(),
             appointment_id: None,
+            episode_id: None,
             session_date: "2026-09-01".to_string(),
             start_time: Some("15:00".to_string()),
             duration_minutes: Some(50),

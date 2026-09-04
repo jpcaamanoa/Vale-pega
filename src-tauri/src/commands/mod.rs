@@ -1,6 +1,7 @@
 mod app_info;
 mod appointments;
 mod calendar;
+mod episode_clinical_profile;
 mod goals;
 mod patient_clinical_profile;
 mod patient_prep_notes;
@@ -8,11 +9,13 @@ mod patients;
 mod payments;
 mod sessions;
 mod therapy_tasks;
+mod treatment_episodes;
 mod vault;
 
 pub use app_info::*;
 pub use appointments::*;
 pub use calendar::*;
+pub use episode_clinical_profile::*;
 pub use goals::*;
 pub use patient_clinical_profile::*;
 pub use patient_prep_notes::*;
@@ -20,4 +23,5 @@ pub use patients::*;
 pub use payments::*;
 pub use sessions::*;
 pub use therapy_tasks::*;
+pub use treatment_episodes::*;
 pub use vault::*;

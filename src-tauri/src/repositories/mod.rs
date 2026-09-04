@@ -5,6 +5,7 @@
 
 pub mod app_settings;
 pub mod appointments;
+pub mod episode_clinical_profile;
 pub mod goal_indicators;
 pub mod goals;
 pub mod patient_clinical_profile;
@@ -15,3 +16,4 @@ pub mod session_goals;
 pub mod session_notes;
 pub mod sessions;
 pub mod therapy_tasks;
+pub mod treatment_episodes;

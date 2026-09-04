@@ -118,7 +118,7 @@ mod tests {
         let goal_id = uuid::Uuid::new_v4().to_string();
         goals::insert(
             conn,
-            &NewGoalRow { id: &goal_id, patient_id: &patient_id, title: "Objetivo de prueba", description: None, status: "activo", target_date: None },
+            &NewGoalRow { id: &goal_id, patient_id: &patient_id, episode_id: None, title: "Objetivo de prueba", description: None, status: "activo", target_date: None },
         )
         .unwrap();
         goal_id

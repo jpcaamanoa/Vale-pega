@@ -4,6 +4,8 @@ export interface Goal {
   id: string
   patientId: string
   formulationId: string | null
+  /** Opcional (Fase 9) — proceso terapéutico al que pertenece este objetivo. */
+  episodeId: string | null
   title: string
   description: string | null
   status: GoalStatus
@@ -30,6 +32,8 @@ export interface GoalListItem {
 
 export interface GoalInput {
   patientId: string
+  /** Opcional (Fase 9) — vincular este objetivo a un proceso terapéutico. */
+  episodeId?: string | null
   title: string
   description?: string | null
   targetDate?: string | null

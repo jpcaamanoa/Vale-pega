@@ -5,11 +5,13 @@ import { ClinicalProfileTab } from '../clinical-profile/ClinicalProfileTab'
 import { GoalsTab } from '../goals/GoalsTab'
 import { PaymentsTab } from '../payments/PaymentsTab'
 import { SessionsTab } from '../sessions/SessionsTab'
+import { ProcessesTab } from '../treatment-episodes/ProcessesTab'
 import { patientsApi } from './api'
 import { PATIENT_STATUS_LABELS, type Patient } from './types'
 
 type SectionId =
   | 'resumen'
+  | 'procesos'
   | 'antecedentes'
   | 'sesiones'
   | 'formulacion'
@@ -21,6 +23,7 @@ type SectionId =
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'resumen', label: 'Resumen' },
+  { id: 'procesos', label: 'Procesos' },
   { id: 'antecedentes', label: 'Antecedentes' },
   { id: 'sesiones', label: 'Sesiones' },
   { id: 'formulacion', label: 'Formulación' },
@@ -35,8 +38,8 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 // evaluaciones, etc.) — la navegación ya está preparada para recibirlas sin
 // rehacer la ficha del paciente. "Sesiones" es real desde la Fase 4;
 // "Objetivos" es real desde la Fase 5; "Antecedentes" es real desde la Fase 6;
-// "Pagos" es real desde la Fase 7.
-const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'antecedentes', 'sesiones', 'objetivos', 'pagos']
+// "Pagos" es real desde la Fase 7; "Procesos" es real desde la Fase 9.
+const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'procesos', 'antecedentes', 'sesiones', 'objetivos', 'pagos']
 
 function SummaryRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
@@ -177,6 +180,7 @@ export function PatientDetailScreen() {
       {SECTIONS_WITH_REAL_CONTENT.includes(section) ? (
         <>
           {section === 'resumen' && <ResumenSection patient={patient} />}
+          {section === 'procesos' && id && <ProcessesTab patientId={id} patientArchived={isArchived} />}
           {section === 'antecedentes' && id && <ClinicalProfileTab patientId={id} patientArchived={isArchived} />}
           {section === 'sesiones' && id && <SessionsTab patientId={id} patientArchived={isArchived} />}
           {section === 'objetivos' && id && <GoalsTab patientId={id} patientArchived={isArchived} />}

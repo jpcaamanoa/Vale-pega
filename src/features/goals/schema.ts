@@ -11,6 +11,7 @@ export const goalCreateFormSchema = z.object({
   title: titleField,
   description: z.string().optional(),
   targetDate: targetDateField,
+  episodeId: z.string().optional(),
 })
 
 export type GoalCreateFormValues = z.infer<typeof goalCreateFormSchema>

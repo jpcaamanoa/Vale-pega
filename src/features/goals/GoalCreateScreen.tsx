@@ -1,10 +1,14 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
+import { Select } from '../../components/ui/Select'
 import { TextField } from '../../components/ui/TextField'
 import { Textarea } from '../../components/ui/Textarea'
+import { formatSessionDate } from '../sessions/datetime'
+import { treatmentEpisodesApi } from '../treatment-episodes/api'
+import type { TreatmentEpisode } from '../treatment-episodes/types'
 import { goalsApi } from './api'
 import { goalCreateFormSchema, type GoalCreateFormValues } from './schema'
 import type { GoalInput } from './types'
@@ -18,15 +22,34 @@ export function GoalCreateScreen() {
   const { patientId } = useParams<{ patientId: string }>()
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
+  const [episodes, setEpisodes] = useState<TreatmentEpisode[]>([])
 
   const {
     register,
     handleSubmit,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<GoalCreateFormValues>({
     resolver: zodResolver(goalCreateFormSchema),
-    defaultValues: { title: '', description: '', targetDate: '' },
+    defaultValues: { title: '', description: '', targetDate: '', episodeId: '' },
   })
+
+  useEffect(() => {
+    if (!patientId) return
+    // Solo procesos que pueden recibir objetivos nuevos — nunca 'cerrado'
+    // (ver services::treatment_episodes::check_episode_assignable).
+    treatmentEpisodesApi
+      .list(patientId)
+      .then((results) => {
+        const assignable = results.filter((e) => e.status !== 'cerrado')
+        setEpisodes(assignable)
+        const active = assignable.find((e) => e.status === 'activo')
+        if (active) setValue('episodeId', active.id)
+      })
+      .catch(() => {
+        // Sin proceso disponible no es un error de la pantalla.
+      })
+  }, [patientId, setValue])
 
   if (!patientId) return null
 
@@ -35,6 +58,7 @@ export function GoalCreateScreen() {
     try {
       const input: GoalInput = {
         patientId,
+        episodeId: values.episodeId || null,
         title: values.title,
         description: values.description || null,
         targetDate: values.targetDate || null,
@@ -59,6 +83,16 @@ export function GoalCreateScreen() {
           {...register('targetDate')}
           error={errors.targetDate?.message}
         />
+        {episodes.length > 0 && (
+          <Select label="Proceso terapéutico (opcional)" {...register('episodeId')}>
+            <option value="">— Sin proceso —</option>
+            {episodes.map((ep) => (
+              <option key={ep.id} value={ep.id}>
+                Iniciado el {formatSessionDate(ep.startedAt)} {ep.status === 'pausado' ? '(pausado)' : ''}
+              </option>
+            ))}
+          </Select>
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="secondary" onClick={() => navigate(`/patients/${patientId}`)}>
             Cancelar

@@ -20,6 +20,9 @@ pub struct Goal {
     pub id: String,
     pub patient_id: String,
     pub formulation_id: Option<String>,
+    /// Opcional (Fase 9) — el proceso terapéutico al que pertenece este
+    /// objetivo, si corresponde.
+    pub episode_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub status: String,
@@ -43,6 +46,7 @@ pub struct GoalListItem {
 pub struct NewGoalRow<'a> {
     pub id: &'a str,
     pub patient_id: &'a str,
+    pub episode_id: Option<&'a str>,
     pub title: &'a str,
     pub description: Option<&'a str>,
     pub status: &'a str,
@@ -60,28 +64,29 @@ pub struct GoalUpdateRow<'a> {
 }
 
 const GOAL_COLUMNS: &str =
-    "id, patient_id, formulation_id, title, description, status, target_date, created_at, updated_at, deleted_at";
+    "id, patient_id, formulation_id, episode_id, title, description, status, target_date, created_at, updated_at, deleted_at";
 
 fn map_row(row: &Row) -> rusqlite::Result<Goal> {
     Ok(Goal {
         id: row.get(0)?,
         patient_id: row.get(1)?,
         formulation_id: row.get(2)?,
-        title: row.get(3)?,
-        description: row.get(4)?,
-        status: row.get(5)?,
-        target_date: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        deleted_at: row.get(9)?,
+        episode_id: row.get(3)?,
+        title: row.get(4)?,
+        description: row.get(5)?,
+        status: row.get(6)?,
+        target_date: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        deleted_at: row.get(10)?,
     })
 }
 
 pub fn insert(conn: &Connection, row: &NewGoalRow) -> rusqlite::Result<Goal> {
     conn.execute(
-        "INSERT INTO therapeutic_goals (id, patient_id, title, description, status, target_date) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![row.id, row.patient_id, row.title, row.description, row.status, row.target_date],
+        "INSERT INTO therapeutic_goals (id, patient_id, episode_id, title, description, status, target_date) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![row.id, row.patient_id, row.episode_id, row.title, row.description, row.status, row.target_date],
     )?;
     find_by_id(conn, row.id).map(|opt| opt.expect("se acaba de insertar"))
 }
@@ -204,7 +209,7 @@ mod tests {
         let patient_id = create_test_patient(&conn, "Paciente Uno");
         let g = insert(
             &conn,
-            &NewGoalRow { id: "g1", patient_id: &patient_id, title: "Reducir ansiedad", description: None, status: "activo", target_date: None },
+            &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: None, title: "Reducir ansiedad", description: None, status: "activo", target_date: None },
         )
         .unwrap();
         assert_eq!(g.patient_id, patient_id);
@@ -223,7 +228,7 @@ mod tests {
     fn list_active_and_deleted_are_mutually_exclusive() {
         let conn = test_conn("list-active-deleted");
         let patient_id = create_test_patient(&conn, "Paciente Dos");
-        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, title: "Objetivo", description: None, status: "activo", target_date: None })
+        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: None, title: "Objetivo", description: None, status: "activo", target_date: None })
             .unwrap();
 
         assert_eq!(list_active_by_patient(&conn, &patient_id).unwrap().len(), 1);
@@ -242,7 +247,7 @@ mod tests {
     fn list_item_reports_indicator_and_session_counts() {
         let conn = test_conn("list-counts");
         let patient_id = create_test_patient(&conn, "Paciente Tres");
-        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, title: "Objetivo", description: None, status: "activo", target_date: None })
+        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: None, title: "Objetivo", description: None, status: "activo", target_date: None })
             .unwrap();
         conn.execute(
             "INSERT INTO goal_indicators (id, goal_id, description) VALUES ('i1', 'g1', 'Indicador uno')",
@@ -264,7 +269,7 @@ mod tests {
     fn update_changes_fields_but_not_patient() {
         let conn = test_conn("update");
         let patient_id = create_test_patient(&conn, "Paciente Cuatro");
-        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, title: "Original", description: None, status: "activo", target_date: None })
+        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: None, title: "Original", description: None, status: "activo", target_date: None })
             .unwrap();
 
         let updated = update(
@@ -283,7 +288,7 @@ mod tests {
     fn update_on_archived_goal_does_nothing() {
         let conn = test_conn("update-archived");
         let patient_id = create_test_patient(&conn, "Paciente Cinco");
-        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, title: "Original", description: None, status: "activo", target_date: None })
+        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: None, title: "Original", description: None, status: "activo", target_date: None })
             .unwrap();
         soft_delete(&conn, "g1").unwrap();
 
@@ -295,7 +300,7 @@ mod tests {
     fn restoring_a_never_archived_goal_reports_nothing_changed() {
         let conn = test_conn("restore-noop");
         let patient_id = create_test_patient(&conn, "Paciente Seis");
-        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, title: "Objetivo", description: None, status: "activo", target_date: None })
+        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: None, title: "Objetivo", description: None, status: "activo", target_date: None })
             .unwrap();
         assert!(!restore(&conn, "g1").unwrap());
     }

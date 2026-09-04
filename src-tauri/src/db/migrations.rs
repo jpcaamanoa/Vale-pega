@@ -587,6 +587,151 @@ BEGIN
 END;
 "#;
 
+/// V4 (Fase 9): episodios/procesos terapéuticos mínimos — resuelve el
+/// problema estructural "paciente ≠ proceso" identificado en la auditoría
+/// post Fase 8. Ver `docs/treatment-episodes.md` para el diseño completo.
+///
+/// `treatment_episodes` es deliberadamente pequeña: solo `started_at` y
+/// `status` (`activo`/`pausado`/`cerrado`). NO lleva `reason_for_end`,
+/// `closure_summary`, `recommendations` ni ningún campo de cierre
+/// estructurado — esos pertenecen a la futura Fase 10 (Cierre/Alta), que
+/// vivirá en una tabla `episode_closures` separada, todavía sin crear. El
+/// valor `'cerrado'` ya existe en el `CHECK` para que el modelo esté
+/// preparado, pero la capa de servicio de esta fase (`services::
+/// treatment_episodes::set_status`) deliberadamente NO permite alcanzarlo
+/// desde la UI — solo la migración legacy de abajo lo escribe directamente,
+/// para pacientes cuyo `patients.status` ya era `'alta'`.
+///
+/// Un solo proceso `'activo'` por paciente, reforzado en dos capas
+/// independientes (mismo criterio de defensa en profundidad que
+/// `idx_session_notes_current` en `SCHEMA_V1`): el servicio lo verifica
+/// explícitamente antes de escribir, y el índice único parcial
+/// `idx_treatment_episodes_one_active_per_patient` lo garantiza también a
+/// nivel de base de datos como último recurso.
+///
+/// `episode_clinical_profile` es 1:1 con el episodio (mismo patrón que
+/// `patient_clinical_profile` 1:1 con el paciente desde `SCHEMA_V1`, con
+/// `episode_id` como su propia `PRIMARY KEY`). Contiene únicamente
+/// `presenting_problem`/`primary_diagnosis_code`/`diagnosis_notes` — los
+/// tres campos que la auditoría post Fase 8 clasificó como específicos de
+/// proceso. `relevant_medical_notes` y `risk_flags` **no se copian aquí**:
+/// permanecen exclusivamente en `patient_clinical_profile` como
+/// longitudinales del paciente (política conservadora aprobada — `risk_flags`
+/// en particular se trata como longitudinal mientras no exista una
+/// taxonomía que distinga riesgo histórico de riesgo específico de proceso,
+/// decisión clínica explícitamente diferida, no tomada por esta migración).
+///
+/// **`patient_clinical_profile` no se modifica de ninguna forma** — ni sus
+/// columnas ni sus datos. La migración copia (nunca mueve, nunca borra)
+/// `presenting_problem`/`primary_diagnosis_code`/`diagnosis_notes` hacia el
+/// `episode_clinical_profile` del proceso legacy correspondiente, dejando el
+/// original completamente intacto — preservación ante todo, sin arriesgar
+/// nunca dejar un diagnóstico histórico en `NULL` por error de migración.
+///
+/// `sessions.episode_id`/`therapeutic_goals.episode_id` son columnas
+/// puramente aditivas (`ALTER TABLE ADD COLUMN`, nullable, `ON DELETE SET
+/// NULL`) — `patient_id` sigue siendo obligatorio en ambas tablas y esta
+/// migración no lo toca. Una sesión o un objetivo pueden seguir existiendo
+/// sin proceso (ej. una entrevista única previa a decidir iniciar un
+/// proceso formal) — `episode_id NOT NULL` nunca se impone.
+///
+/// **Migración legacy** (backfill, automática y no destructiva): se crea
+/// como máximo **un** proceso legacy por paciente (id determinístico
+/// `'legacy-' || patient_id`, nunca un UUID aleatorio — a propósito, para
+/// que el origen de la fila sea auditable a simple vista), y solo para
+/// pacientes que tengan al menos una sesión, un objetivo terapéutico, o un
+/// `patient_clinical_profile` ya registrado — un paciente cuya única
+/// actividad sean preparaciones/tareas/pagos (que no reciben `episode_id`
+/// en esta fase, ver más abajo) no recibe ningún proceso legacy, para no
+/// crear "episodios basura" sin ningún dato real que agrupar. `started_at`
+/// se deriva, en orden de preferencia: la fecha de la sesión más antigua del
+/// paciente, luego `patients.intake_date`, luego la fecha (sin hora) de
+/// `patients.created_at` — siempre existe al menos el último. El `status`
+/// del proceso legacy se deriva del único dato ya existente que se le
+/// parece: `'cerrado'` si `patients.status = 'alta'`, `'activo'` en
+/// cualquier otro caso (`activo`/`inactivo`/`archivado`) — sin inventar
+/// ninguna heurística de fechas ("si pasaron X meses…"), tal como exigía la
+/// aprobación de esta fase. Todas las sesiones y objetivos existentes de un
+/// paciente con proceso legacy quedan asociados a ese único proceso — nunca
+/// se intenta reconstruir múltiples procesos antiguos a partir de fechas.
+///
+/// **Deliberadamente sin `episode_id` en esta fase**: `payments`,
+/// `patient_prep_notes`, `therapy_tasks`, `documents`,
+/// `assessment_administrations`, `case_formulations`, `reminders`,
+/// `appointments` — ninguna de estas tablas se modifica. Ver
+/// `docs/treatment-episodes.md` para la justificación completa de por qué
+/// Fase 9 se mantiene deliberadamente pequeña.
+const SCHEMA_V4: &str = r#"
+CREATE TABLE treatment_episodes (
+  id TEXT PRIMARY KEY,
+  patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
+  started_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'activo'
+    CHECK (status IN ('activo','pausado','cerrado')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  deleted_at TEXT
+);
+CREATE INDEX idx_treatment_episodes_patient_status ON treatment_episodes(patient_id, status);
+-- Defensa en profundidad (mismo criterio que idx_session_notes_current en
+-- SCHEMA_V1): un solo proceso activo por paciente, garantizado también a
+-- nivel de base de datos, no solo en el servicio.
+CREATE UNIQUE INDEX idx_treatment_episodes_one_active_per_patient
+  ON treatment_episodes(patient_id) WHERE status = 'activo' AND deleted_at IS NULL;
+CREATE TRIGGER trg_treatment_episodes_touch_updated_at
+AFTER UPDATE ON treatment_episodes
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE treatment_episodes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+
+CREATE TABLE episode_clinical_profile (
+  episode_id TEXT PRIMARY KEY REFERENCES treatment_episodes(id) ON DELETE RESTRICT,
+  presenting_problem TEXT,
+  primary_diagnosis_code TEXT,
+  diagnosis_notes TEXT,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TRIGGER trg_episode_clinical_profile_touch_updated_at
+AFTER UPDATE ON episode_clinical_profile
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE episode_clinical_profile SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE episode_id = NEW.episode_id;
+END;
+
+ALTER TABLE sessions ADD COLUMN episode_id TEXT REFERENCES treatment_episodes(id) ON DELETE SET NULL;
+CREATE INDEX idx_sessions_episode ON sessions(episode_id);
+
+ALTER TABLE therapeutic_goals ADD COLUMN episode_id TEXT REFERENCES treatment_episodes(id) ON DELETE SET NULL;
+CREATE INDEX idx_therapeutic_goals_episode ON therapeutic_goals(episode_id);
+
+-- Migración legacy: un proceso como máximo por paciente con actividad
+-- clínica real ya registrada (sesiones, objetivos o antecedentes).
+INSERT INTO treatment_episodes (id, patient_id, started_at, status)
+SELECT
+  'legacy-' || p.id,
+  p.id,
+  COALESCE(
+    (SELECT MIN(s.session_date) FROM sessions s WHERE s.patient_id = p.id),
+    p.intake_date,
+    substr(p.created_at, 1, 10)
+  ),
+  CASE WHEN p.status = 'alta' THEN 'cerrado' ELSE 'activo' END
+FROM patients p
+WHERE
+  EXISTS (SELECT 1 FROM sessions s WHERE s.patient_id = p.id)
+  OR EXISTS (SELECT 1 FROM therapeutic_goals g WHERE g.patient_id = p.id)
+  OR EXISTS (SELECT 1 FROM patient_clinical_profile cp WHERE cp.patient_id = p.id);
+
+UPDATE sessions SET episode_id = 'legacy-' || patient_id;
+UPDATE therapeutic_goals SET episode_id = 'legacy-' || patient_id;
+
+INSERT INTO episode_clinical_profile (episode_id, presenting_problem, primary_diagnosis_code, diagnosis_notes)
+SELECT 'legacy-' || cp.patient_id, cp.presenting_problem, cp.primary_diagnosis_code, cp.diagnosis_notes
+FROM patient_clinical_profile cp;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -595,6 +740,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V1).foreign_key_check(),
         M::up(SCHEMA_V2).foreign_key_check(),
         M::up(SCHEMA_V3).foreign_key_check(),
+        M::up(SCHEMA_V4).foreign_key_check(),
     ])
 }
 
@@ -647,6 +793,8 @@ mod tests {
         "app_settings",
         "patient_prep_notes",
         "therapy_tasks",
+        "treatment_episodes",
+        "episode_clinical_profile",
     ];
 
     fn migrated_vault(name: &str) -> (rusqlite::Connection, std::path::PathBuf, VaultKey) {
@@ -913,6 +1061,243 @@ mod tests {
             )
             .expect_err("un estado fuera del CHECK debe rechazarse a nivel de base de datos");
         assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    // ---------------------------------------------------------------
+    // 2d (Fase 9): migración V4 — treatment_episodes/episode_clinical_profile
+    // + episode_id en sessions/therapeutic_goals + backfill legacy — es
+    // aditiva y no destructiva sobre un vault V1+V2+V3 real con datos ya
+    // insertados.
+    // ---------------------------------------------------------------
+    #[test]
+    fn fresh_database_has_v4_tables_and_columns() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v4");
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('treatment_episodes', 'episode_clinical_profile')")
+            .unwrap();
+        let names: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|n| n.unwrap()).collect();
+        assert_eq!(names.len(), 2, "una base nueva debe tener ambas tablas de Fase 9 desde el arranque");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(sessions)").unwrap();
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(cols.contains(&"episode_id".to_string()), "sessions debe tener episode_id desde el arranque");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(therapeutic_goals)").unwrap();
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(cols.contains(&"episode_id".to_string()), "therapeutic_goals debe tener episode_id desde el arranque");
+    }
+
+    #[test]
+    fn v4_migration_is_idempotent() {
+        let path = temp_db_path("v4-idempotent");
+        let k = key(0xE5);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1+V2+V3+V4 ya vigentes no debería fallar");
+
+        let started_at: String = conn.query_row("SELECT started_at FROM treatment_episodes WHERE id = 'ep1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(started_at, "2026-01-01");
+    }
+
+    #[test]
+    fn treatment_episode_rejects_invalid_status() {
+        let (conn, _path, _key) = migrated_vault("v4-episode-invalid-status");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('ep1', 'p1', '2026-01-01', 'inventado')",
+                [],
+            )
+            .expect_err("un estado fuera del CHECK debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    #[test]
+    fn a_second_active_episode_for_the_same_patient_is_rejected_at_database_level() {
+        let (conn, _path, _key) = migrated_vault("v4-one-active-episode");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('ep1', 'p1', '2026-01-01', 'activo')", []).unwrap();
+
+        let err = conn
+            .execute("INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('ep2', 'p1', '2026-02-01', 'activo')", [])
+            .expect_err("un segundo proceso activo para el mismo paciente debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+
+        // Pero un segundo proceso PAUSADO sí es aceptado — el índice único
+        // parcial solo restringe status = 'activo'.
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('ep3', 'p1', '2026-02-01', 'pausado')", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn v4_migration_preserves_all_existing_data_and_does_not_touch_patient_clinical_profile() {
+        let path = temp_db_path("v4-preserves-data");
+        let k = key(0xE6);
+
+        // 1. Llevar un vault a V1+V2+V3 — simula el estado real de un vault
+        //    creado antes de Fase 9, con un paciente con sesión, objetivo,
+        //    antecedentes clínicos y una tarea/preparación ya cargados.
+        {
+            let mut conn = open_vault(&path, &k).unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            Migrations::new(vec![
+                M::up(SCHEMA_V1).foreign_key_check(),
+                M::up(SCHEMA_V2).foreign_key_check(),
+                M::up(SCHEMA_V3).foreign_key_check(),
+            ])
+            .to_latest(&mut conn)
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+            conn.execute(
+                "INSERT INTO patients (id, full_name, status, intake_date) VALUES ('p1', 'Paciente Ficticio Uno', 'activo', '2025-03-01')",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO sessions (id, patient_id, session_date) VALUES ('s1', 'p1', '2025-03-10')", []).unwrap();
+            conn.execute("INSERT INTO sessions (id, patient_id, session_date) VALUES ('s2', 'p1', '2025-04-05')", []).unwrap();
+            conn.execute("INSERT INTO therapeutic_goals (id, patient_id, title) VALUES ('g1', 'p1', 'Objetivo previo a Fase 9')", []).unwrap();
+            conn.execute(
+                "INSERT INTO patient_clinical_profile (patient_id, presenting_problem, primary_diagnosis_code, diagnosis_notes, risk_flags, relevant_medical_notes) \
+                 VALUES ('p1', 'Duelo', 'F43.2', 'Notas diagnósticas previas', '[\"riesgo histórico\"]', 'Antecedente médico longitudinal')",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO patient_prep_notes (id, patient_id, content) VALUES ('pn1', 'p1', 'Preparación previa')", []).unwrap();
+            conn.execute("INSERT INTO therapy_tasks (id, patient_id, description) VALUES ('t1', 'p1', 'Tarea previa')", []).unwrap();
+
+            // Paciente sin ninguna actividad clínica relevante — no debe
+            // recibir proceso legacy.
+            conn.execute("INSERT INTO patients (id, full_name, status) VALUES ('p2', 'Paciente Sin Actividad', 'activo')", []).unwrap();
+
+            // Paciente ya dado de alta — su proceso legacy debe nacer 'cerrado'.
+            conn.execute("INSERT INTO patients (id, full_name, status) VALUES ('p3', 'Paciente De Alta', 'alta')", []).unwrap();
+            conn.execute("INSERT INTO sessions (id, patient_id, session_date) VALUES ('s3', 'p3', '2024-06-01')", []).unwrap();
+        }
+
+        // 2. Reabrir y aplicar el mecanismo normal de migraciones
+        //    (V1+V2+V3+V4) — exactamente lo que hace la app en cada arranque.
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).expect("V4 debe aplicarse limpiamente sobre un vault V1+V2+V3 con datos reales");
+
+        // 3. Todos los datos previos siguen intactos, sin excepción.
+        let name: String = conn.query_row("SELECT full_name FROM patients WHERE id = 'p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Paciente Ficticio Uno");
+        let goal_title: String = conn.query_row("SELECT title FROM therapeutic_goals WHERE id = 'g1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(goal_title, "Objetivo previo a Fase 9");
+        let prep_content: String = conn.query_row("SELECT content FROM patient_prep_notes WHERE id = 'pn1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(prep_content, "Preparación previa");
+        let task_desc: String = conn.query_row("SELECT description FROM therapy_tasks WHERE id = 't1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(task_desc, "Tarea previa");
+
+        // 4. patient_clinical_profile NO se tocó: los cinco campos originales
+        //    siguen exactamente iguales, incluidos los tres que también se
+        //    copiaron al episodio legacy.
+        let (presenting, diag_code, diag_notes): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT presenting_problem, primary_diagnosis_code, diagnosis_notes FROM patient_clinical_profile WHERE patient_id = 'p1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        let (risk_flags, medical_notes): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT risk_flags, relevant_medical_notes FROM patient_clinical_profile WHERE patient_id = 'p1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(presenting.as_deref(), Some("Duelo"));
+        assert_eq!(diag_code.as_deref(), Some("F43.2"));
+        assert_eq!(diag_notes.as_deref(), Some("Notas diagnósticas previas"));
+        assert_eq!(risk_flags.as_deref(), Some(r#"["riesgo histórico"]"#));
+        assert_eq!(medical_notes.as_deref(), Some("Antecedente médico longitudinal"));
+
+        // 5. Proceso legacy creado para p1: started_at = fecha de la sesión
+        //    más antigua (2025-03-10, no la más reciente ni intake_date),
+        //    status = 'activo' (patients.status = 'activo').
+        let (p1_started, p1_status): (String, String) = conn
+            .query_row("SELECT started_at, status FROM treatment_episodes WHERE id = 'legacy-p1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(p1_started, "2025-03-10");
+        assert_eq!(p1_status, "activo");
+
+        // 6. Ambas sesiones y el objetivo de p1 quedan asociados a su único
+        //    proceso legacy.
+        let s1_episode: String = conn.query_row("SELECT episode_id FROM sessions WHERE id = 's1'", [], |r| r.get(0)).unwrap();
+        let s2_episode: String = conn.query_row("SELECT episode_id FROM sessions WHERE id = 's2'", [], |r| r.get(0)).unwrap();
+        let g1_episode: String = conn.query_row("SELECT episode_id FROM therapeutic_goals WHERE id = 'g1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(s1_episode, "legacy-p1");
+        assert_eq!(s2_episode, "legacy-p1");
+        assert_eq!(g1_episode, "legacy-p1");
+
+        // 7. episode_clinical_profile del proceso legacy de p1 contiene
+        //    exactamente los tres campos específicos de proceso — nunca
+        //    risk_flags ni relevant_medical_notes (no existen esas columnas
+        //    en esta tabla).
+        let (e_presenting, e_diag_code, e_diag_notes): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT presenting_problem, primary_diagnosis_code, diagnosis_notes FROM episode_clinical_profile WHERE episode_id = 'legacy-p1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(e_presenting.as_deref(), Some("Duelo"));
+        assert_eq!(e_diag_code.as_deref(), Some("F43.2"));
+        assert_eq!(e_diag_notes.as_deref(), Some("Notas diagnósticas previas"));
+
+        // 8. p2 (sin sesiones/objetivos/antecedentes) NO recibe proceso
+        //    legacy — no se crean episodios basura sin datos que agrupar.
+        let p2_episode_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM treatment_episodes WHERE patient_id = 'p2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(p2_episode_count, 0);
+
+        // 9. p3 (patients.status = 'alta') recibe un proceso legacy YA
+        //    'cerrado' — no 'activo'.
+        let p3_status: String = conn.query_row("SELECT status FROM treatment_episodes WHERE id = 'legacy-p3'", [], |r| r.get(0)).unwrap();
+        assert_eq!(p3_status, "cerrado");
+    }
+
+    #[test]
+    fn v4_legacy_episode_started_at_falls_back_to_intake_date_then_created_at() {
+        let path = temp_db_path("v4-legacy-started-at-fallback");
+        let k = key(0xE7);
+        {
+            let mut conn = open_vault(&path, &k).unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            Migrations::new(vec![
+                M::up(SCHEMA_V1).foreign_key_check(),
+                M::up(SCHEMA_V2).foreign_key_check(),
+                M::up(SCHEMA_V3).foreign_key_check(),
+            ])
+            .to_latest(&mut conn)
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+            // Paciente con objetivo (sin sesiones) e intake_date: started_at
+            // debe usar intake_date, no created_at.
+            conn.execute("INSERT INTO patients (id, full_name, intake_date) VALUES ('p1', 'X', '2024-05-20')", []).unwrap();
+            conn.execute("INSERT INTO therapeutic_goals (id, patient_id, title) VALUES ('g1', 'p1', 'Objetivo')", []).unwrap();
+
+            // Paciente con solo antecedentes clínicos, sin intake_date: debe
+            // caer a la fecha (sin hora) de created_at.
+            conn.execute("INSERT INTO patients (id, full_name) VALUES ('p2', 'Y')", []).unwrap();
+            conn.execute("INSERT INTO patient_clinical_profile (patient_id) VALUES ('p2')", []).unwrap();
+        }
+
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let p1_started: String = conn.query_row("SELECT started_at FROM treatment_episodes WHERE id = 'legacy-p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(p1_started, "2024-05-20");
+
+        let (p2_started, p2_created_at): (String, String) = conn
+            .query_row("SELECT te.started_at, p.created_at FROM treatment_episodes te JOIN patients p ON p.id = te.patient_id WHERE te.id = 'legacy-p2'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(p2_started, &p2_created_at[0..10]);
     }
 
     // ---------------------------------------------------------------

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::repositories::{appointments, patients};
 use crate::repositories::session_notes::{self, NewSessionNoteRow, SessionNote};
 use crate::repositories::sessions::{self, NewSessionRow, Session, SessionListItem, SessionMetadataUpdateRow};
+use crate::services::treatment_episodes::{self, TreatmentEpisodeError};
 
 pub const VALID_MODALITIES: &[&str] = &["presencial", "online", "telefonico"];
 pub const VALID_STATUSES: &[&str] = &["programada", "realizada", "cancelada", "no_asistio"];
@@ -32,6 +33,10 @@ const DEFAULT_STATUS: &str = "programada";
 pub struct SessionInput {
     pub patient_id: String,
     pub appointment_id: Option<String>,
+    /// Opcional (Fase 9) — el proceso terapéutico al que se vincula esta
+    /// sesión. `None` es válido: una sesión puede existir sin proceso
+    /// formal (ver `services::treatment_episodes`).
+    pub episode_id: Option<String>,
     pub session_date: String,
     pub start_time: Option<String>,
     pub duration_minutes: Option<i64>,
@@ -99,6 +104,10 @@ pub enum SessionError {
     NoteNotFound,
     NoteIsLocked,
     EmptyNoteContent,
+    EpisodeNotFound,
+    EpisodeArchived,
+    EpisodeNotAssignable,
+    EpisodePatientMismatch,
     Database(rusqlite::Error),
 }
 
@@ -118,6 +127,10 @@ impl fmt::Display for SessionError {
             SessionError::NoteNotFound => write!(f, "nota no encontrada"),
             SessionError::NoteIsLocked => write!(f, "esta nota está cerrada y no puede editarse directamente"),
             SessionError::EmptyNoteContent => write!(f, "la nota no puede cerrarse sin contenido"),
+            SessionError::EpisodeNotFound => write!(f, "proceso terapéutico no encontrado"),
+            SessionError::EpisodeArchived => write!(f, "este proceso está archivado y no puede recibir sesiones nuevas"),
+            SessionError::EpisodeNotAssignable => write!(f, "este proceso está cerrado y no puede recibir sesiones nuevas"),
+            SessionError::EpisodePatientMismatch => write!(f, "el proceso indicado no pertenece a este paciente"),
             SessionError::Database(_) => write!(f, "error interno al acceder a la base de datos"),
         }
     }
@@ -138,6 +151,24 @@ impl From<rusqlite::Error> for SessionError {
 impl From<SessionValidationError> for SessionError {
     fn from(e: SessionValidationError) -> Self {
         SessionError::Validation(e)
+    }
+}
+/// Traduce los errores de `treatment_episodes::check_episode_assignable` a
+/// sus equivalentes de dominio de sesiones — nunca deja pasar un
+/// `TreatmentEpisodeError` crudo hacia arriba.
+impl From<TreatmentEpisodeError> for SessionError {
+    fn from(e: TreatmentEpisodeError) -> Self {
+        match e {
+            TreatmentEpisodeError::NotFound => SessionError::EpisodeNotFound,
+            TreatmentEpisodeError::EpisodeArchived => SessionError::EpisodeArchived,
+            TreatmentEpisodeError::EpisodeNotAssignable => SessionError::EpisodeNotAssignable,
+            TreatmentEpisodeError::EpisodePatientMismatch => SessionError::EpisodePatientMismatch,
+            TreatmentEpisodeError::Database(err) => SessionError::Database(err),
+            // El resto de las variantes (Validation/PatientNotFound/PatientArchived/
+            // AnotherEpisodeActive/ClosureNotImplemented) no las produce
+            // `check_episode_assignable` — nunca deberían alcanzarse aquí.
+            _ => SessionError::EpisodeNotFound,
+        }
     }
 }
 
@@ -245,6 +276,8 @@ pub fn create_session(conn: &Connection, input: SessionInput) -> Result<SessionW
         }
     }
 
+    treatment_episodes::check_episode_assignable(conn, &input.episode_id, &input.patient_id)?;
+
     let f = validate_common(input.session_date, input.start_time, input.duration_minutes, input.modality)?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -257,6 +290,7 @@ pub fn create_session(conn: &Connection, input: SessionInput) -> Result<SessionW
             id: &session_id,
             patient_id: &input.patient_id,
             appointment_id: input.appointment_id.as_deref(),
+            episode_id: input.episode_id.as_deref(),
             session_date: &f.session_date,
             start_time: f.start_time.as_deref(),
             duration_minutes: f.duration_minutes,
@@ -475,11 +509,96 @@ mod tests {
         SessionInput {
             patient_id: patient_id.to_string(),
             appointment_id: None,
+            episode_id: None,
             session_date: "2026-09-01".to_string(),
             start_time: Some("15:00".to_string()),
             duration_minutes: Some(50),
             modality: Some("presencial".to_string()),
         }
+    }
+
+    fn create_test_episode(conn: &Connection, patient_id: &str) -> String {
+        use crate::services::treatment_episodes::{self, TreatmentEpisodeInput};
+        treatment_episodes::create_episode(conn, TreatmentEpisodeInput { patient_id: patient_id.to_string(), started_at: None }).unwrap().id
+    }
+
+    // ---- Fase 9: episode_id opcional ----
+
+    #[test]
+    fn a_session_can_be_created_without_an_episode() {
+        let conn = test_conn("episode-none");
+        let patient_id = create_test_patient(&conn, "Paciente Sin Proceso");
+        let result = create_session(&conn, minimal_input(&patient_id)).unwrap();
+        assert!(result.session.episode_id.is_none());
+    }
+
+    #[test]
+    fn a_session_can_be_created_with_a_valid_episode_of_the_same_patient() {
+        let conn = test_conn("episode-valid");
+        let patient_id = create_test_patient(&conn, "Paciente Con Proceso");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        let mut input = minimal_input(&patient_id);
+        input.episode_id = Some(episode_id.clone());
+        let result = create_session(&conn, input).unwrap();
+        assert_eq!(result.session.episode_id.as_deref(), Some(episode_id.as_str()));
+    }
+
+    #[test]
+    fn creation_rejects_an_episode_belonging_to_a_different_patient() {
+        let conn = test_conn("episode-mismatch");
+        let patient_a = create_test_patient(&conn, "Paciente A");
+        let patient_b = create_test_patient(&conn, "Paciente B");
+        let episode_of_a = create_test_episode(&conn, &patient_a);
+        let mut input = minimal_input(&patient_b);
+        input.episode_id = Some(episode_of_a);
+        let err = create_session(&conn, input).unwrap_err();
+        assert!(matches!(err, SessionError::EpisodePatientMismatch));
+    }
+
+    #[test]
+    fn creation_rejects_a_nonexistent_episode() {
+        let conn = test_conn("episode-not-found");
+        let patient_id = create_test_patient(&conn, "Paciente C");
+        let mut input = minimal_input(&patient_id);
+        input.episode_id = Some("no-existe".to_string());
+        let err = create_session(&conn, input).unwrap_err();
+        assert!(matches!(err, SessionError::EpisodeNotFound));
+    }
+
+    #[test]
+    fn creation_rejects_an_archived_episode() {
+        let conn = test_conn("episode-archived");
+        let patient_id = create_test_patient(&conn, "Paciente D");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        crate::services::treatment_episodes::archive_episode(&conn, &episode_id).unwrap();
+        let mut input = minimal_input(&patient_id);
+        input.episode_id = Some(episode_id);
+        let err = create_session(&conn, input).unwrap_err();
+        assert!(matches!(err, SessionError::EpisodeArchived));
+    }
+
+    #[test]
+    fn creation_rejects_a_closed_episode() {
+        let conn = test_conn("episode-closed");
+        let patient_id = create_test_patient(&conn, "Paciente E");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        crate::repositories::treatment_episodes::set_status(&conn, &episode_id, "cerrado").unwrap();
+        let mut input = minimal_input(&patient_id);
+        input.episode_id = Some(episode_id);
+        let err = create_session(&conn, input).unwrap_err();
+        assert!(matches!(err, SessionError::EpisodeNotAssignable));
+    }
+
+    #[test]
+    fn creation_accepts_a_paused_episode() {
+        let conn = test_conn("episode-paused");
+        let patient_id = create_test_patient(&conn, "Paciente F");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        crate::services::treatment_episodes::set_episode_status(&conn, &episode_id, "pausado").unwrap();
+        let mut input = minimal_input(&patient_id);
+        input.episode_id = Some(episode_id.clone());
+        let result = create_session(&conn, input).unwrap();
+        assert_eq!(result.session.episode_id.as_deref(), Some(episode_id.as_str()));
     }
 
     // ---- creación ----

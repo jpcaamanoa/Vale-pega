@@ -5,6 +5,8 @@ export interface Session {
   id: string
   patientId: string
   appointmentId: string | null
+  /** Opcional (Fase 9) — proceso terapéutico al que pertenece esta sesión. */
+  episodeId: string | null
   sessionDate: string
   startTime: string | null
   durationMinutes: number | null
@@ -35,6 +37,8 @@ export interface SessionListItem {
 export interface SessionInput {
   patientId: string
   appointmentId?: string | null
+  /** Opcional (Fase 9) — vincular esta sesión a un proceso terapéutico. */
+  episodeId?: string | null
   sessionDate: string
   startTime?: string | null
   durationMinutes?: number | null

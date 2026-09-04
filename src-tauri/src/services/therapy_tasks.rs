@@ -361,6 +361,7 @@ mod tests {
                 id: &id,
                 patient_id,
                 appointment_id: None,
+                episode_id: None,
                 session_date: "2026-09-01",
                 start_time: None,
                 duration_minutes: None,
@@ -374,7 +375,7 @@ mod tests {
 
     fn create_test_goal(conn: &Connection, patient_id: &str, title: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        goals_repo::insert(conn, &NewGoalRow { id: &id, patient_id, title, description: None, status: "activo", target_date: None }).unwrap();
+        goals_repo::insert(conn, &NewGoalRow { id: &id, patient_id, episode_id: None, title, description: None, status: "activo", target_date: None }).unwrap();
         id
     }
 

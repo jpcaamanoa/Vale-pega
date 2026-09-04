@@ -20,6 +20,7 @@ export const sessionCreateFormSchema = z.object({
   startTime: timeField,
   durationMinutes: durationField,
   modality: z.string().optional(),
+  episodeId: z.string().optional(),
 })
 
 export type SessionCreateFormValues = z.infer<typeof sessionCreateFormSchema>

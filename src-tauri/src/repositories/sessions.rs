@@ -16,6 +16,7 @@ pub struct Session {
     pub id: String,
     pub patient_id: String,
     pub appointment_id: Option<String>,
+    pub episode_id: Option<String>,
     pub session_date: String,
     pub start_time: Option<String>,
     pub duration_minutes: Option<i64>,
@@ -46,6 +47,12 @@ pub struct NewSessionRow<'a> {
     pub id: &'a str,
     pub patient_id: &'a str,
     pub appointment_id: Option<&'a str>,
+    /// Opcional (Fase 9) — el proceso terapéutico al que pertenece esta
+    /// sesión, si corresponde. `None` es un valor perfectamente válido: una
+    /// sesión puede existir antes de que exista un proceso formal (ej. una
+    /// entrevista única). Fijado una sola vez al crear, igual criterio que
+    /// `appointment_id` — no se reasigna desde `SessionMetadataUpdateRow`.
+    pub episode_id: Option<&'a str>,
     pub session_date: &'a str,
     pub start_time: Option<&'a str>,
     pub duration_minutes: Option<i64>,
@@ -66,7 +73,7 @@ pub struct SessionMetadataUpdateRow<'a> {
     pub status: &'a str,
 }
 
-const SESSION_COLUMNS: &str = "id, patient_id, appointment_id, session_date, start_time, \
+const SESSION_COLUMNS: &str = "id, patient_id, appointment_id, episode_id, session_date, start_time, \
      duration_minutes, modality, status, created_at, updated_at, deleted_at";
 
 fn map_row(row: &Row) -> rusqlite::Result<Session> {
@@ -74,25 +81,27 @@ fn map_row(row: &Row) -> rusqlite::Result<Session> {
         id: row.get(0)?,
         patient_id: row.get(1)?,
         appointment_id: row.get(2)?,
-        session_date: row.get(3)?,
-        start_time: row.get(4)?,
-        duration_minutes: row.get(5)?,
-        modality: row.get(6)?,
-        status: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-        deleted_at: row.get(10)?,
+        episode_id: row.get(3)?,
+        session_date: row.get(4)?,
+        start_time: row.get(5)?,
+        duration_minutes: row.get(6)?,
+        modality: row.get(7)?,
+        status: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        deleted_at: row.get(11)?,
     })
 }
 
 pub fn insert(conn: &Connection, row: &NewSessionRow) -> rusqlite::Result<Session> {
     conn.execute(
-        "INSERT INTO sessions (id, patient_id, appointment_id, session_date, start_time, \
-         duration_minutes, modality, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO sessions (id, patient_id, appointment_id, episode_id, session_date, start_time, \
+         duration_minutes, modality, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             row.id,
             row.patient_id,
             row.appointment_id,
+            row.episode_id,
             row.session_date,
             row.start_time,
             row.duration_minutes,
@@ -248,10 +257,10 @@ mod tests {
         let patient_id = create_test_patient(&conn, "Paciente Conteo");
         let today: String = conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0)).unwrap();
 
-        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
-        insert(&conn, &NewSessionRow { id: "s2", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "realizada" }).unwrap();
-        insert(&conn, &NewSessionRow { id: "s3", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "cancelada" }).unwrap();
-        insert(&conn, &NewSessionRow { id: "s4", patient_id: &patient_id, appointment_id: None, session_date: "2020-01-01", start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, episode_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s2", patient_id: &patient_id, appointment_id: None, episode_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "realizada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s3", patient_id: &patient_id, appointment_id: None, episode_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "cancelada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s4", patient_id: &patient_id, appointment_id: None, episode_id: None, session_date: "2020-01-01", start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
 
         assert_eq!(count_this_month(&conn).unwrap(), 2, "excluye la cancelada y la de otro mes/año");
     }
@@ -262,7 +271,7 @@ mod tests {
         let patient_id = create_test_patient(&conn, "Paciente Conteo Archivadas");
         let today: String = conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0)).unwrap();
 
-        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, episode_id: None, session_date: &today, start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
         soft_delete(&conn, "s1").unwrap();
 
         assert_eq!(count_this_month(&conn).unwrap(), 0);
@@ -278,6 +287,7 @@ mod tests {
                 id: "s1",
                 patient_id: &patient_id,
                 appointment_id: None,
+                episode_id: None,
                 session_date: "2026-09-01",
                 start_time: Some("15:00"),
                 duration_minutes: Some(50),
@@ -307,6 +317,7 @@ mod tests {
                 id: "s1",
                 patient_id: &patient_id,
                 appointment_id: None,
+                episode_id: None,
                 session_date: "2026-09-01",
                 start_time: None,
                 duration_minutes: None,
@@ -338,6 +349,7 @@ mod tests {
                 id: "s1",
                 patient_id: &patient_id,
                 appointment_id: None,
+                episode_id: None,
                 session_date: "2026-09-01",
                 start_time: None,
                 duration_minutes: None,
@@ -375,6 +387,7 @@ mod tests {
                 id: "s1",
                 patient_id: &patient_id,
                 appointment_id: None,
+                episode_id: None,
                 session_date: "2026-09-01",
                 start_time: None,
                 duration_minutes: None,
@@ -404,6 +417,7 @@ mod tests {
                 id: "s1",
                 patient_id: &patient_id,
                 appointment_id: None,
+                episode_id: None,
                 session_date: "2026-09-01",
                 start_time: None,
                 duration_minutes: None,

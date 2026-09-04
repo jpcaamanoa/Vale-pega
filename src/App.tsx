@@ -25,6 +25,7 @@ import { SessionCreateScreen } from './features/sessions/SessionCreateScreen'
 import { SessionDetailScreen } from './features/sessions/SessionDetailScreen'
 import { SettingsScreen } from './features/settings/SettingsScreen'
 import { StatisticsScreen } from './features/statistics/StatisticsScreen'
+import { TreatmentEpisodeDetailScreen } from './features/treatment-episodes/TreatmentEpisodeDetailScreen'
 
 type Screen =
   | { kind: 'loading' }
@@ -118,6 +119,7 @@ function App() {
               <Route path="/patients/:patientId/goals/:goalId" element={<GoalDetailScreen />} />
               <Route path="/patients/:patientId/payments/new" element={<PaymentCreateScreen />} />
               <Route path="/patients/:patientId/payments/:paymentId" element={<PaymentDetailScreen />} />
+              <Route path="/patients/:patientId/episodes/:episodeId" element={<TreatmentEpisodeDetailScreen />} />
               <Route path="/agenda" element={<AgendaScreen />} />
               <Route path="/agenda/new" element={<AppointmentCreateScreen />} />
               <Route path="/agenda/:id" element={<AppointmentDetailScreen />} />

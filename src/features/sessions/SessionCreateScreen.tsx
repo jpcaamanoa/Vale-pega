@@ -7,7 +7,10 @@ import { Select } from '../../components/ui/Select'
 import { TextField } from '../../components/ui/TextField'
 import { agendaApi } from '../agenda/api'
 import { isoToLocalInput } from '../agenda/datetime'
+import { treatmentEpisodesApi } from '../treatment-episodes/api'
+import type { TreatmentEpisode } from '../treatment-episodes/types'
 import { sessionsApi } from './api'
+import { formatSessionDate } from './datetime'
 import { sessionCreateFormSchema, type SessionCreateFormValues } from './schema'
 import { SESSION_MODALITY_LABELS, type SessionInput } from './types'
 
@@ -24,16 +27,36 @@ export function SessionCreateScreen() {
   const appointmentId = searchParams.get('appointmentId') || undefined
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
+  const [episodes, setEpisodes] = useState<TreatmentEpisode[]>([])
 
   const {
     register,
     handleSubmit,
     reset,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<SessionCreateFormValues>({
     resolver: zodResolver(sessionCreateFormSchema),
-    defaultValues: { sessionDate: '', startTime: '', durationMinutes: '50', modality: '' },
+    defaultValues: { sessionDate: '', startTime: '', durationMinutes: '50', modality: '', episodeId: '' },
   })
+
+  useEffect(() => {
+    if (!patientId) return
+    // Solo procesos que pueden recibir sesiones nuevas — nunca 'cerrado'
+    // (ver services::treatment_episodes::check_episode_assignable).
+    treatmentEpisodesApi
+      .list(patientId)
+      .then((results) => {
+        const assignable = results.filter((e) => e.status !== 'cerrado')
+        setEpisodes(assignable)
+        const active = assignable.find((e) => e.status === 'activo')
+        if (active) setValue('episodeId', active.id)
+      })
+      .catch(() => {
+        // Sin proceso disponible no es un error de la pantalla — el selector
+        // simplemente queda vacío.
+      })
+  }, [patientId, setValue])
 
   useEffect(() => {
     if (!appointmentId) return
@@ -57,6 +80,7 @@ export function SessionCreateScreen() {
       const input: SessionInput = {
         patientId,
         appointmentId: appointmentId ?? null,
+        episodeId: values.episodeId || null,
         sessionDate: values.sessionDate,
         startTime: values.startTime || null,
         durationMinutes: values.durationMinutes ? Number(values.durationMinutes) : null,
@@ -92,6 +116,16 @@ export function SessionCreateScreen() {
               </option>
             ))}
           </Select>
+          {episodes.length > 0 && (
+            <Select label="Proceso terapéutico (opcional)" {...register('episodeId')}>
+              <option value="">— Sin proceso —</option>
+              {episodes.map((ep) => (
+                <option key={ep.id} value={ep.id}>
+                  Iniciado el {formatSessionDate(ep.startedAt)} {ep.status === 'pausado' ? '(pausado)' : ''}
+                </option>
+              ))}
+            </Select>
+          )}
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="secondary" onClick={() => navigate(`/patients/${patientId}`)}>

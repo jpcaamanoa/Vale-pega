@@ -24,6 +24,7 @@ use crate::repositories::goals::{self, Goal, GoalListItem, GoalUpdateRow, NewGoa
 use crate::repositories::patients;
 use crate::repositories::session_goals::{self, GoalSessionRow, SessionGoalRow};
 use crate::repositories::sessions;
+use crate::services::treatment_episodes::{self, TreatmentEpisodeError};
 
 pub const VALID_STATUSES: &[&str] = &["activo", "logrado", "pausado", "descartado"];
 const DEFAULT_STATUS: &str = "activo";
@@ -32,6 +33,10 @@ const DEFAULT_STATUS: &str = "activo";
 #[serde(rename_all = "camelCase")]
 pub struct GoalInput {
     pub patient_id: String,
+    /// Opcional (Fase 9) — el proceso terapéutico al que se vincula este
+    /// objetivo. `None` es válido: un objetivo puede existir sin proceso
+    /// formal.
+    pub episode_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub target_date: Option<String>,
@@ -98,6 +103,14 @@ pub enum GoalError {
     PatientMismatch,
     LinkAlreadyExists,
     LinkNotFound,
+    EpisodeNotFound,
+    EpisodeArchived,
+    EpisodeNotAssignable,
+    EpisodePatientMismatch,
+    /// La sesión y el objetivo que se intentan vincular tienen ambos
+    /// `episode_id`, pero apuntan a procesos distintos (§9 de la
+    /// aprobación de Fase 9).
+    LinkEpisodeMismatch,
     Database(rusqlite::Error),
 }
 
@@ -113,6 +126,11 @@ impl fmt::Display for GoalError {
             GoalError::PatientMismatch => write!(f, "el objetivo pertenece a otro paciente"),
             GoalError::LinkAlreadyExists => write!(f, "esta sesión ya tiene vinculado este objetivo"),
             GoalError::LinkNotFound => write!(f, "este objetivo no está vinculado a esta sesión"),
+            GoalError::EpisodeNotFound => write!(f, "proceso terapéutico no encontrado"),
+            GoalError::EpisodeArchived => write!(f, "este proceso está archivado y no puede recibir objetivos nuevos"),
+            GoalError::EpisodeNotAssignable => write!(f, "este proceso está cerrado y no puede recibir objetivos nuevos"),
+            GoalError::EpisodePatientMismatch => write!(f, "el proceso indicado no pertenece a este paciente"),
+            GoalError::LinkEpisodeMismatch => write!(f, "la sesión y el objetivo pertenecen a procesos terapéuticos distintos"),
             GoalError::Database(_) => write!(f, "error interno al acceder a la base de datos"),
         }
     }
@@ -133,6 +151,20 @@ impl From<rusqlite::Error> for GoalError {
 impl From<GoalValidationError> for GoalError {
     fn from(e: GoalValidationError) -> Self {
         GoalError::Validation(e)
+    }
+}
+/// Traduce los errores de `treatment_episodes::check_episode_assignable` —
+/// mismo criterio que `impl From<TreatmentEpisodeError> for SessionError`.
+impl From<TreatmentEpisodeError> for GoalError {
+    fn from(e: TreatmentEpisodeError) -> Self {
+        match e {
+            TreatmentEpisodeError::NotFound => GoalError::EpisodeNotFound,
+            TreatmentEpisodeError::EpisodeArchived => GoalError::EpisodeArchived,
+            TreatmentEpisodeError::EpisodeNotAssignable => GoalError::EpisodeNotAssignable,
+            TreatmentEpisodeError::EpisodePatientMismatch => GoalError::EpisodePatientMismatch,
+            TreatmentEpisodeError::Database(err) => GoalError::Database(err),
+            _ => GoalError::EpisodeNotFound,
+        }
     }
 }
 
@@ -195,11 +227,13 @@ pub fn create_goal(conn: &Connection, input: GoalInput) -> Result<Goal, GoalErro
         return Err(GoalError::PatientArchived);
     }
 
+    treatment_episodes::check_episode_assignable(conn, &input.episode_id, &input.patient_id)?;
+
     let f = validate_common(input.title, input.description, input.target_date)?;
     let id = uuid::Uuid::new_v4().to_string();
     Ok(goals::insert(
         conn,
-        &NewGoalRow { id: &id, patient_id: &input.patient_id, title: &f.title, description: f.description.as_deref(), status: DEFAULT_STATUS, target_date: f.target_date.as_deref() },
+        &NewGoalRow { id: &id, patient_id: &input.patient_id, episode_id: input.episode_id.as_deref(), title: &f.title, description: f.description.as_deref(), status: DEFAULT_STATUS, target_date: f.target_date.as_deref() },
     )?)
 }
 
@@ -310,6 +344,15 @@ pub fn link_session_goal(conn: &Connection, input: SessionGoalLinkInput) -> Resu
     if session.patient_id != goal.patient_id {
         return Err(GoalError::PatientMismatch);
     }
+    // Fase 9: si ambos tienen episode_id, deben coincidir. Si alguno no
+    // tiene (el caso más común hoy, antes de que episode_id se generalice),
+    // se mantiene exactamente el comportamiento previo — sin rechazar nada
+    // nuevo (§9 de la aprobación de Fase 9).
+    if let (Some(session_episode), Some(goal_episode)) = (&session.episode_id, &goal.episode_id) {
+        if session_episode != goal_episode {
+            return Err(GoalError::LinkEpisodeMismatch);
+        }
+    }
     let patient = patients::find_by_id(conn, &goal.patient_id)?.ok_or(GoalError::PatientNotFound)?;
     if patient.deleted_at.is_some() {
         return Err(GoalError::PatientArchived);
@@ -408,6 +451,7 @@ mod tests {
         let input = SessionInput {
             patient_id: patient_id.to_string(),
             appointment_id: None,
+            episode_id: None,
             session_date: "2026-09-01".to_string(),
             start_time: Some("15:00".to_string()),
             duration_minutes: Some(50),
@@ -417,7 +461,126 @@ mod tests {
     }
 
     fn minimal_goal_input(patient_id: &str) -> GoalInput {
-        GoalInput { patient_id: patient_id.to_string(), title: "Reducir ansiedad".to_string(), description: None, target_date: None }
+        GoalInput { patient_id: patient_id.to_string(), episode_id: None, title: "Reducir ansiedad".to_string(), description: None, target_date: None }
+    }
+
+    fn create_test_episode(conn: &Connection, patient_id: &str) -> String {
+        treatment_episodes::create_episode(conn, crate::services::treatment_episodes::TreatmentEpisodeInput { patient_id: patient_id.to_string(), started_at: None }).unwrap().id
+    }
+
+    // ---- Fase 9: episode_id opcional en objetivos ----
+
+    #[test]
+    fn a_goal_can_be_created_without_an_episode() {
+        let conn = test_conn("goal-episode-none");
+        let patient_id = create_test_patient(&conn, "Paciente Sin Proceso");
+        let goal = create_goal(&conn, minimal_goal_input(&patient_id)).unwrap();
+        assert!(goal.episode_id.is_none());
+    }
+
+    #[test]
+    fn a_goal_can_be_created_with_a_valid_episode_of_the_same_patient() {
+        let conn = test_conn("goal-episode-valid");
+        let patient_id = create_test_patient(&conn, "Paciente Con Proceso");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        let mut input = minimal_goal_input(&patient_id);
+        input.episode_id = Some(episode_id.clone());
+        let goal = create_goal(&conn, input).unwrap();
+        assert_eq!(goal.episode_id.as_deref(), Some(episode_id.as_str()));
+    }
+
+    #[test]
+    fn goal_creation_rejects_an_episode_belonging_to_a_different_patient() {
+        let conn = test_conn("goal-episode-mismatch");
+        let patient_a = create_test_patient(&conn, "Paciente A");
+        let patient_b = create_test_patient(&conn, "Paciente B");
+        let episode_of_a = create_test_episode(&conn, &patient_a);
+        let mut input = minimal_goal_input(&patient_b);
+        input.episode_id = Some(episode_of_a);
+        let err = create_goal(&conn, input).unwrap_err();
+        assert!(matches!(err, GoalError::EpisodePatientMismatch));
+    }
+
+    #[test]
+    fn goal_creation_rejects_a_nonexistent_episode() {
+        let conn = test_conn("goal-episode-not-found");
+        let patient_id = create_test_patient(&conn, "Paciente C");
+        let mut input = minimal_goal_input(&patient_id);
+        input.episode_id = Some("no-existe".to_string());
+        let err = create_goal(&conn, input).unwrap_err();
+        assert!(matches!(err, GoalError::EpisodeNotFound));
+    }
+
+    #[test]
+    fn goal_creation_rejects_a_closed_episode() {
+        let conn = test_conn("goal-episode-closed");
+        let patient_id = create_test_patient(&conn, "Paciente D");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        crate::repositories::treatment_episodes::set_status(&conn, &episode_id, "cerrado").unwrap();
+        let mut input = minimal_goal_input(&patient_id);
+        input.episode_id = Some(episode_id);
+        let err = create_goal(&conn, input).unwrap_err();
+        assert!(matches!(err, GoalError::EpisodeNotAssignable));
+    }
+
+    #[test]
+    fn linking_a_session_and_goal_of_the_same_episode_succeeds() {
+        let conn = test_conn("link-same-episode");
+        let patient_id = create_test_patient(&conn, "Paciente E");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        let mut goal_input = minimal_goal_input(&patient_id);
+        goal_input.episode_id = Some(episode_id.clone());
+        let goal_id = create_goal(&conn, goal_input).unwrap().id;
+
+        let session_input = SessionInput {
+            patient_id: patient_id.clone(), appointment_id: None, episode_id: Some(episode_id),
+            session_date: "2026-09-01".to_string(), start_time: None, duration_minutes: None, modality: None,
+        };
+        let session_id = session_service::create_session(&conn, session_input).unwrap().session.id;
+
+        link_session_goal(&conn, SessionGoalLinkInput { session_id, goal_id, progress_note: None }).unwrap();
+    }
+
+    #[test]
+    fn linking_a_session_and_goal_of_different_episodes_is_rejected() {
+        let conn = test_conn("link-different-episodes");
+        let patient_id = create_test_patient(&conn, "Paciente F");
+        let episode_a = create_test_episode(&conn, &patient_id);
+        let mut goal_input = minimal_goal_input(&patient_id);
+        goal_input.episode_id = Some(episode_a);
+        let goal_id = create_goal(&conn, goal_input).unwrap().id;
+
+        // Pausar el primer proceso para poder abrir uno segundo y así tener
+        // dos episode_id distintos y válidos para el mismo paciente.
+        treatment_episodes::set_episode_status(&conn, goals::find_by_id(&conn, &goal_id).unwrap().unwrap().episode_id.as_deref().unwrap(), "pausado").unwrap();
+        let episode_b = create_test_episode(&conn, &patient_id);
+
+        let session_input = SessionInput {
+            patient_id: patient_id.clone(), appointment_id: None, episode_id: Some(episode_b),
+            session_date: "2026-09-01".to_string(), start_time: None, duration_minutes: None, modality: None,
+        };
+        let session_id = session_service::create_session(&conn, session_input).unwrap().session.id;
+
+        let err = link_session_goal(&conn, SessionGoalLinkInput { session_id, goal_id, progress_note: None }).unwrap_err();
+        assert!(matches!(err, GoalError::LinkEpisodeMismatch));
+    }
+
+    #[test]
+    fn linking_still_works_when_only_one_side_has_an_episode() {
+        // Compatibilidad explícita con el comportamiento previo a Fase 9:
+        // si la sesión o el objetivo no tienen episode_id, el vínculo no se
+        // rechaza por eso.
+        let conn = test_conn("link-one-sided-episode");
+        let patient_id = create_test_patient(&conn, "Paciente G");
+        let episode_id = create_test_episode(&conn, &patient_id);
+        let mut goal_input = minimal_goal_input(&patient_id);
+        goal_input.episode_id = Some(episode_id);
+        let goal_id = create_goal(&conn, goal_input).unwrap().id;
+
+        // Sesión SIN episode_id.
+        let session_id = create_test_session(&conn, &patient_id);
+
+        link_session_goal(&conn, SessionGoalLinkInput { session_id, goal_id, progress_note: None }).unwrap();
     }
 
     // ---- creación de objetivos ----

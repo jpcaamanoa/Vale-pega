@@ -231,6 +231,7 @@ mod tests {
                 id: &id,
                 patient_id,
                 appointment_id: None,
+                episode_id: None,
                 session_date: "2026-09-01",
                 start_time: None,
                 duration_minutes: None,

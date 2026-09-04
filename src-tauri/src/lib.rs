@@ -145,6 +145,16 @@ pub fn run() {
       commands::archive_therapy_task,
       commands::restore_therapy_task,
       commands::get_pending_therapy_task_count,
+      commands::create_treatment_episode,
+      commands::get_treatment_episode,
+      commands::list_treatment_episodes,
+      commands::list_archived_treatment_episodes,
+      commands::set_treatment_episode_status,
+      commands::archive_treatment_episode,
+      commands::restore_treatment_episode,
+      commands::get_episode_clinical_profile,
+      commands::create_episode_clinical_profile,
+      commands::update_episode_clinical_profile,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
