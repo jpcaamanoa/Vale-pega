@@ -249,6 +249,13 @@ pub fn list_archived_goals(conn: &Connection, patient_id: &str) -> Result<Vec<Go
     Ok(goals::list_deleted_by_patient(conn, patient_id)?)
 }
 
+/// Objetivos relacionados con un proceso terapéutico — usada por la vista
+/// de un proceso (Fase 11), con su estado actual en vivo, nunca una copia
+/// congelada.
+pub fn list_goals_by_episode(conn: &Connection, episode_id: &str) -> Result<Vec<GoalListItem>, GoalError> {
+    Ok(goals::list_by_episode(conn, episode_id)?)
+}
+
 /// Cambia título, descripción, estado y fecha objetivo. `logrado` no es un
 /// estado terminal — cualquier transición entre los cuatro estados válidos
 /// es aceptada, incluida `logrado` → cualquier otro (regla explícita de la

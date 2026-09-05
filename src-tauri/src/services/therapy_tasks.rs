@@ -252,6 +252,14 @@ pub fn list_pending_tasks(conn: &Connection, patient_id: &str) -> Result<Vec<The
     Ok(therapy_tasks::list_pending_by_patient(conn, patient_id)?)
 }
 
+/// `'pendiente'` + `'parcial'` del paciente — usada exclusivamente por la
+/// advertencia del flujo de cierre de un proceso (Fase 11). Ver la nota de
+/// `repositories::therapy_tasks::list_pending_or_partial_by_patient` sobre
+/// por qué es una función separada de `list_pending_tasks`.
+pub fn list_pending_or_partial_tasks(conn: &Connection, patient_id: &str) -> Result<Vec<TherapyTaskListItem>, TherapyTaskError> {
+    Ok(therapy_tasks::list_pending_or_partial_by_patient(conn, patient_id)?)
+}
+
 /// Conteo global de tareas pendientes, para el bloque "Pendientes" del
 /// Dashboard.
 pub fn pending_task_count(conn: &Connection) -> Result<i64, TherapyTaskError> {

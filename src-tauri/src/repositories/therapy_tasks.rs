@@ -162,6 +162,26 @@ pub fn count_pending(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM therapy_tasks WHERE status = 'pendiente' AND deleted_at IS NULL", [], |r| r.get(0))
 }
 
+/// `'pendiente'` + `'parcial'` (no archivadas) — usada exclusivamente por
+/// la advertencia del flujo de cierre de un proceso (Fase 11), donde
+/// también interesan las tareas "a medio hacer", no solo las que ni
+/// siquiera se empezaron. Deliberadamente **distinta** de
+/// `list_pending_by_patient` (que sigue significando únicamente
+/// `'pendiente'` en el resto de la aplicación — panel de continuidad,
+/// conteo del Dashboard) para no alterar ningún comportamiento ya
+/// aprobado.
+pub fn list_pending_or_partial_by_patient(conn: &Connection, patient_id: &str) -> rusqlite::Result<Vec<TherapyTaskListItem>> {
+    let sql = "SELECT t.id, t.assigned_in_session_id, t.goal_id, g.title, t.description, t.status, t.assigned_at, \
+         t.review_due_at, t.reviewed_in_session_id, t.reviewed_at \
+         FROM therapy_tasks t \
+         LEFT JOIN therapeutic_goals g ON g.id = t.goal_id \
+         WHERE t.patient_id = ?1 AND t.status IN ('pendiente', 'parcial') AND t.deleted_at IS NULL \
+         ORDER BY t.assigned_at ASC";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![patient_id], map_list_row)?;
+    rows.collect()
+}
+
 /// Edita descripción/objetivo/fecha de revisión prevista. No toca `status`
 /// ni los campos de revisión — eso es responsabilidad de `set_review`.
 /// Igual que `repositories::goals::update`, no tiene efecto sobre una tarea
@@ -354,6 +374,23 @@ mod tests {
         let pending = list_pending_by_patient(&conn, &patient_id).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "t1");
+    }
+
+    #[test]
+    fn list_pending_or_partial_includes_partial_but_excludes_resolved_and_archived() {
+        let conn = test_conn("list-pending-or-partial");
+        let patient_id = create_test_patient(&conn, "Paciente Cinco Bis");
+        insert(&conn, &NewTherapyTaskRow { id: "t1", patient_id: &patient_id, assigned_in_session_id: None, goal_id: None, description: "Pendiente", review_due_at: None }).unwrap();
+        insert(&conn, &NewTherapyTaskRow { id: "t2", patient_id: &patient_id, assigned_in_session_id: None, goal_id: None, description: "Parcial", review_due_at: None }).unwrap();
+        insert(&conn, &NewTherapyTaskRow { id: "t3", patient_id: &patient_id, assigned_in_session_id: None, goal_id: None, description: "Realizada", review_due_at: None }).unwrap();
+        insert(&conn, &NewTherapyTaskRow { id: "t4", patient_id: &patient_id, assigned_in_session_id: None, goal_id: None, description: "Archivada", review_due_at: None }).unwrap();
+        set_review(&conn, "t2", "parcial", None).unwrap();
+        set_review(&conn, "t3", "realizada", None).unwrap();
+        soft_delete(&conn, "t4").unwrap();
+
+        let mut ids: Vec<String> = list_pending_or_partial_by_patient(&conn, &patient_id).unwrap().into_iter().map(|t| t.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["t1".to_string(), "t2".to_string()]);
     }
 
     #[test]

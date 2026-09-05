@@ -44,6 +44,13 @@ pub fn list_pending_therapy_tasks(patient_id: String, state: State<'_, SharedVau
     state.with_connection(|conn| therapy_tasks::list_pending_tasks(conn, &patient_id)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
 }
 
+/// `'pendiente'` + `'parcial'` del paciente — usada exclusivamente por la
+/// advertencia del flujo de cierre de un proceso (Fase 11).
+#[tauri::command]
+pub fn list_pending_or_partial_therapy_tasks(patient_id: String, state: State<'_, SharedVaultSession>) -> Result<Vec<TherapyTaskListItem>, String> {
+    state.with_connection(|conn| therapy_tasks::list_pending_or_partial_tasks(conn, &patient_id)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn update_therapy_task(id: String, input: TherapyTaskUpdateInput, state: State<'_, SharedVaultSession>) -> Result<TherapyTask, String> {
     state.with_connection(|conn| therapy_tasks::update_task(conn, &id, input)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())

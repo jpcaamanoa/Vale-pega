@@ -130,6 +130,25 @@ pub fn list_deleted_by_patient(conn: &Connection, patient_id: &str) -> rusqlite:
     list(conn, patient_id, true)
 }
 
+/// Objetivos no archivados vinculados a un proceso terapéutico concreto —
+/// usada para mostrar "objetivos relacionados" en la vista de un proceso,
+/// con su estado actual en vivo, nunca una copia congelada (Fase 11). Nunca
+/// incluye objetivos de otro proceso ni objetivos sin proceso, aunque sean
+/// del mismo paciente.
+pub fn list_by_episode(conn: &Connection, episode_id: &str) -> rusqlite::Result<Vec<GoalListItem>> {
+    let sql = "SELECT g.id, g.title, g.status, g.target_date, \
+         (SELECT COUNT(*) FROM goal_indicators gi WHERE gi.goal_id = g.id), \
+         (SELECT COUNT(*) FROM session_goals sg WHERE sg.goal_id = g.id) \
+         FROM therapeutic_goals g \
+         WHERE g.episode_id = ?1 AND g.deleted_at IS NULL \
+         ORDER BY g.created_at DESC";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![episode_id], |row| {
+        Ok(GoalListItem { id: row.get(0)?, title: row.get(1)?, status: row.get(2)?, target_date: row.get(3)?, indicator_count: row.get(4)?, session_count: row.get(5)? })
+    })?;
+    rows.collect()
+}
+
 pub fn update(conn: &Connection, id: &str, row: &GoalUpdateRow) -> rusqlite::Result<Option<Goal>> {
     let affected = conn.execute(
         "UPDATE therapeutic_goals SET title = ?1, description = ?2, status = ?3, target_date = ?4 \
@@ -263,6 +282,43 @@ mod tests {
         let items = list_active_by_patient(&conn, &patient_id).unwrap();
         assert_eq!(items[0].indicator_count, 2);
         assert_eq!(items[0].session_count, 0);
+    }
+
+    fn create_test_episode(conn: &Connection, patient_id: &str, status: &str) -> String {
+        let episode_id = uuid::Uuid::new_v4().to_string();
+        crate::repositories::treatment_episodes::insert(
+            conn,
+            &crate::repositories::treatment_episodes::NewTreatmentEpisodeRow { id: &episode_id, patient_id, started_at: "2026-01-01", status },
+        )
+        .unwrap();
+        episode_id
+    }
+
+    #[test]
+    fn list_by_episode_only_returns_goals_of_that_episode() {
+        let conn = test_conn("list-by-episode");
+        let patient_id = create_test_patient(&conn, "Paciente Proceso Uno");
+        let episode_a = create_test_episode(&conn, &patient_id, "pausado");
+        let episode_b = create_test_episode(&conn, &patient_id, "activo");
+
+        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: Some(&episode_a), title: "Del proceso A", description: None, status: "activo", target_date: None }).unwrap();
+        insert(&conn, &NewGoalRow { id: "g2", patient_id: &patient_id, episode_id: Some(&episode_b), title: "Del proceso B", description: None, status: "activo", target_date: None }).unwrap();
+        insert(&conn, &NewGoalRow { id: "g3", patient_id: &patient_id, episode_id: None, title: "Sin proceso", description: None, status: "activo", target_date: None }).unwrap();
+
+        let goals_a = list_by_episode(&conn, &episode_a).unwrap();
+        assert_eq!(goals_a.len(), 1);
+        assert_eq!(goals_a[0].title, "Del proceso A");
+    }
+
+    #[test]
+    fn list_by_episode_excludes_archived_goals() {
+        let conn = test_conn("list-by-episode-archived");
+        let patient_id = create_test_patient(&conn, "Paciente Proceso Dos");
+        let episode_id = create_test_episode(&conn, &patient_id, "activo");
+        insert(&conn, &NewGoalRow { id: "g1", patient_id: &patient_id, episode_id: Some(&episode_id), title: "Objetivo", description: None, status: "activo", target_date: None }).unwrap();
+        soft_delete(&conn, "g1").unwrap();
+
+        assert_eq!(list_by_episode(&conn, &episode_id).unwrap().len(), 0);
     }
 
     #[test]

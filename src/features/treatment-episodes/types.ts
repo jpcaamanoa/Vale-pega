@@ -46,3 +46,67 @@ export const TREATMENT_EPISODE_STATUS_LABELS: Record<TreatmentEpisodeStatus, str
   pausado: 'Pausado',
   cerrado: 'Cerrado',
 }
+
+/**
+ * Cierre estructurado de un proceso terapéutico (Fase 11). Ver
+ * `docs/episode-closure.md`. Inmutable tras crearse — corregir un error de
+ * fondo es anular (`revertedAt`/`revertedReason`) y crear un cierre nuevo,
+ * nunca editar uno existente.
+ */
+export type ClosureReason = 'alta' | 'cierre_acordado' | 'interrupcion' | 'derivacion' | 'decision_profesional' | 'otro'
+export type ClosureOutcome = 'objetivos_logrados' | 'parcialmente_logrados' | 'no_logrados' | 'no_evaluable'
+
+export const CLOSURE_REASON_LABELS: Record<ClosureReason, string> = {
+  alta: 'Alta terapéutica',
+  cierre_acordado: 'Cierre acordado',
+  interrupcion: 'Interrupción del proceso',
+  derivacion: 'Derivación',
+  decision_profesional: 'Decisión profesional',
+  otro: 'Otro',
+}
+
+export const CLOSURE_OUTCOME_LABELS: Record<ClosureOutcome, string> = {
+  objetivos_logrados: 'Objetivos logrados',
+  parcialmente_logrados: 'Objetivos parcialmente logrados',
+  no_logrados: 'Objetivos no logrados',
+  no_evaluable: 'No evaluable',
+}
+
+export interface EpisodeClosure {
+  id: string
+  episodeId: string
+  closedAt: string
+  reason: ClosureReason
+  reasonDetail: string | null
+  outcome: ClosureOutcome
+  summary: string | null
+  recommendations: string | null
+  revertedAt: string | null
+  revertedReason: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SessionResolutionInput {
+  sessionId: string
+  /** `true` = cancelar esta sesión futura como parte del cierre; `false` = mantenerla tal cual. */
+  cancel: boolean
+}
+
+export interface CloseEpisodeInput {
+  /** Opcional — si no se envía, el backend usa la fecha de hoy. */
+  closedAt?: string | null
+  reason: ClosureReason
+  reasonDetail?: string | null
+  outcome: ClosureOutcome
+  summary?: string | null
+  recommendations?: string | null
+  /** Debe cubrir exactamente las sesiones futuras agendadas del proceso — resolución manual explícita, nunca implícita. */
+  sessionResolutions: SessionResolutionInput[]
+}
+
+export interface RevertClosureInput {
+  revertedReason: string
+  /** A qué estado vuelve el proceso — siempre se pregunta explícitamente, nunca se asume. */
+  reopenStatus: 'activo' | 'pausado'
+}

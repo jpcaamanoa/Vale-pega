@@ -129,29 +129,29 @@ pub fn find_by_appointment_id(conn: &Connection, appointment_id: &str) -> rusqli
     .optional()
 }
 
+fn map_list_row(row: &Row) -> rusqlite::Result<SessionListItem> {
+    Ok(SessionListItem {
+        id: row.get(0)?,
+        session_date: row.get(1)?,
+        start_time: row.get(2)?,
+        duration_minutes: row.get(3)?,
+        modality: row.get(4)?,
+        status: row.get(5)?,
+        has_current_note: row.get(6)?,
+        current_note_is_locked: row.get(7)?,
+    })
+}
+
+const SESSION_LIST_SELECT: &str = "SELECT s.id, s.session_date, s.start_time, s.duration_minutes, s.modality, s.status, \
+     n.id IS NOT NULL, COALESCE(n.is_locked, 0) \
+     FROM sessions s \
+     LEFT JOIN session_notes n ON n.session_id = s.id AND n.is_current = 1";
+
 fn list(conn: &Connection, patient_id: &str, deleted: bool) -> rusqlite::Result<Vec<SessionListItem>> {
     let deleted_clause = if deleted { "s.deleted_at IS NOT NULL" } else { "s.deleted_at IS NULL" };
-    let sql = format!(
-        "SELECT s.id, s.session_date, s.start_time, s.duration_minutes, s.modality, s.status, \
-         n.id IS NOT NULL, COALESCE(n.is_locked, 0) \
-         FROM sessions s \
-         LEFT JOIN session_notes n ON n.session_id = s.id AND n.is_current = 1 \
-         WHERE s.patient_id = ?1 AND {deleted_clause} \
-         ORDER BY s.session_date DESC, COALESCE(s.start_time, '') DESC"
-    );
+    let sql = format!("{SESSION_LIST_SELECT} WHERE s.patient_id = ?1 AND {deleted_clause} ORDER BY s.session_date DESC, COALESCE(s.start_time, '') DESC");
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![patient_id], |row| {
-        Ok(SessionListItem {
-            id: row.get(0)?,
-            session_date: row.get(1)?,
-            start_time: row.get(2)?,
-            duration_minutes: row.get(3)?,
-            modality: row.get(4)?,
-            status: row.get(5)?,
-            has_current_note: row.get(6)?,
-            current_note_is_locked: row.get(7)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![patient_id], map_list_row)?;
     rows.collect()
 }
 
@@ -161,6 +161,31 @@ pub fn list_active_by_patient(conn: &Connection, patient_id: &str) -> rusqlite::
 
 pub fn list_deleted_by_patient(conn: &Connection, patient_id: &str) -> rusqlite::Result<Vec<SessionListItem>> {
     list(conn, patient_id, true)
+}
+
+/// Todas las sesiones no archivadas de un proceso terapéutico, más
+/// recientes primero — usadas para mostrar "sesiones históricas" en la
+/// vista de un proceso (Fase 11). Nunca incluye sesiones de otros procesos
+/// ni sesiones sin proceso, aunque sean del mismo paciente.
+pub fn list_by_episode(conn: &Connection, episode_id: &str) -> rusqlite::Result<Vec<SessionListItem>> {
+    let sql = format!("{SESSION_LIST_SELECT} WHERE s.episode_id = ?1 AND s.deleted_at IS NULL ORDER BY s.session_date DESC, COALESCE(s.start_time, '') DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![episode_id], map_list_row)?;
+    rows.collect()
+}
+
+/// Sesiones futuras todavía agendadas (`'programada'`, fecha posterior a
+/// hoy) de un proceso — usadas por el flujo de cierre (Fase 11) para exigir
+/// una resolución explícita de cada una antes de poder cerrar. Nunca
+/// incluye `appointments` — son conceptos independientes.
+pub fn list_upcoming_by_episode(conn: &Connection, episode_id: &str) -> rusqlite::Result<Vec<SessionListItem>> {
+    let sql = format!(
+        "{SESSION_LIST_SELECT} WHERE s.episode_id = ?1 AND s.status = 'programada' AND s.session_date > date('now') AND s.deleted_at IS NULL \
+         ORDER BY s.session_date ASC, COALESCE(s.start_time, '') ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![episode_id], map_list_row)?;
+    rows.collect()
 }
 
 pub fn update_metadata(conn: &Connection, id: &str, row: &SessionMetadataUpdateRow) -> rusqlite::Result<Option<Session>> {
@@ -275,6 +300,71 @@ mod tests {
         soft_delete(&conn, "s1").unwrap();
 
         assert_eq!(count_this_month(&conn).unwrap(), 0);
+    }
+
+    fn create_test_episode(conn: &Connection, patient_id: &str, status: &str) -> String {
+        let episode_id = uuid::Uuid::new_v4().to_string();
+        crate::repositories::treatment_episodes::insert(
+            conn,
+            &crate::repositories::treatment_episodes::NewTreatmentEpisodeRow { id: &episode_id, patient_id, started_at: "2026-01-01", status },
+        )
+        .unwrap();
+        episode_id
+    }
+
+    #[test]
+    fn list_by_episode_only_returns_sessions_of_that_episode() {
+        let conn = test_conn("list-by-episode");
+        let patient_id = create_test_patient(&conn, "Paciente Proceso Uno");
+        let episode_a = create_test_episode(&conn, &patient_id, "pausado");
+        let episode_b = create_test_episode(&conn, &patient_id, "activo");
+
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, episode_id: Some(&episode_a), session_date: "2026-01-10", start_time: None, duration_minutes: None, modality: None, status: "realizada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s2", patient_id: &patient_id, appointment_id: None, episode_id: Some(&episode_b), session_date: "2026-02-10", start_time: None, duration_minutes: None, modality: None, status: "realizada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s3", patient_id: &patient_id, appointment_id: None, episode_id: None, session_date: "2026-03-10", start_time: None, duration_minutes: None, modality: None, status: "realizada" }).unwrap();
+
+        let sessions_a = list_by_episode(&conn, &episode_a).unwrap();
+        assert_eq!(sessions_a.len(), 1);
+        assert_eq!(sessions_a[0].id, "s1");
+    }
+
+    #[test]
+    fn list_by_episode_excludes_archived_sessions() {
+        let conn = test_conn("list-by-episode-archived");
+        let patient_id = create_test_patient(&conn, "Paciente Proceso Dos");
+        let episode_id = create_test_episode(&conn, &patient_id, "activo");
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, episode_id: Some(&episode_id), session_date: "2026-01-10", start_time: None, duration_minutes: None, modality: None, status: "realizada" }).unwrap();
+        soft_delete(&conn, "s1").unwrap();
+
+        assert_eq!(list_by_episode(&conn, &episode_id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn list_upcoming_by_episode_returns_only_future_scheduled_sessions() {
+        let conn = test_conn("list-upcoming");
+        let patient_id = create_test_patient(&conn, "Paciente Proceso Tres");
+        let episode_id = create_test_episode(&conn, &patient_id, "activo");
+
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, episode_id: Some(&episode_id), session_date: "2099-01-10", start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s2", patient_id: &patient_id, appointment_id: None, episode_id: Some(&episode_id), session_date: "2099-02-10", start_time: None, duration_minutes: None, modality: None, status: "cancelada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s3", patient_id: &patient_id, appointment_id: None, episode_id: Some(&episode_id), session_date: "2020-01-10", start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+
+        let upcoming = list_upcoming_by_episode(&conn, &episode_id).unwrap();
+        assert_eq!(upcoming.len(), 1, "excluye la cancelada y la del pasado, incluye solo la futura programada");
+        assert_eq!(upcoming[0].id, "s1");
+    }
+
+    #[test]
+    fn list_upcoming_by_episode_excludes_other_episodes_and_sessions_without_episode() {
+        let conn = test_conn("list-upcoming-scoped");
+        let patient_id = create_test_patient(&conn, "Paciente Proceso Cuatro");
+        let episode_a = create_test_episode(&conn, &patient_id, "pausado");
+        let episode_b = create_test_episode(&conn, &patient_id, "activo");
+
+        insert(&conn, &NewSessionRow { id: "s1", patient_id: &patient_id, appointment_id: None, episode_id: Some(&episode_b), session_date: "2099-01-10", start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+        insert(&conn, &NewSessionRow { id: "s2", patient_id: &patient_id, appointment_id: None, episode_id: None, session_date: "2099-01-11", start_time: None, duration_minutes: None, modality: None, status: "programada" }).unwrap();
+
+        assert_eq!(list_upcoming_by_episode(&conn, &episode_a).unwrap().len(), 0);
     }
 
     #[test]

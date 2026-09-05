@@ -7,6 +7,7 @@ import { TextField } from '../../components/ui/TextField'
 import { Textarea } from '../../components/ui/Textarea'
 import { formatSessionDate } from '../sessions/datetime'
 import { episodeClinicalProfileApi, treatmentEpisodesApi } from './api'
+import { ClosureSection } from './ClosureSection'
 import { episodeClinicalProfileFormSchema, type EpisodeClinicalProfileFormValues } from './schema'
 import { TREATMENT_EPISODE_STATUS_LABELS, type EpisodeClinicalProfile, type EpisodeClinicalProfileInput, type TreatmentEpisode } from './types'
 
@@ -80,11 +81,9 @@ function EpisodeClinicalProfileForm({
 }
 
 /**
- * Detalle de un proceso terapéutico (Fase 9). Deliberadamente sin la
- * acción de "cerrar definitivamente" — el valor `'cerrado'` existe en el
- * backend para preparar el modelo, pero el cierre estructurado (motivo,
- * resumen, objetivos alcanzados) es Fase 10. Aquí solo se puede
- * pausar/reactivar y archivar/restaurar el registro administrativo.
+ * Detalle de un proceso terapéutico (Fase 9, cierre estructurado agregado
+ * en Fase 11). El cierre (`ClosureSection`) es un evento clínico distinto
+ * del proceso mismo — ver `docs/episode-closure.md`.
  */
 export function TreatmentEpisodeDetailScreen() {
   const { patientId, episodeId } = useParams<{ patientId: string; episodeId: string }>()
@@ -189,6 +188,8 @@ export function TreatmentEpisodeDetailScreen() {
         )}
       </div>
       {statusError && <p className="mb-6 text-sm text-danger">{statusError}</p>}
+
+      <ClosureSection patientId={patientId ?? ''} episode={episode} isArchived={isArchived} onEpisodeUpdated={setEpisode} />
 
       {editingProfile ? (
         <EpisodeClinicalProfileForm

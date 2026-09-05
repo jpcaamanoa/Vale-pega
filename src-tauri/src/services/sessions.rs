@@ -331,6 +331,18 @@ pub fn list_archived_sessions(conn: &Connection, patient_id: &str) -> Result<Vec
     Ok(sessions::list_deleted_by_patient(conn, patient_id)?)
 }
 
+/// Sesiones históricas de un proceso terapéutico — usada por la vista de un
+/// proceso (Fase 11), en vivo, nunca una copia congelada.
+pub fn list_sessions_by_episode(conn: &Connection, episode_id: &str) -> Result<Vec<SessionListItem>, SessionError> {
+    Ok(sessions::list_by_episode(conn, episode_id)?)
+}
+
+/// Sesiones futuras todavía agendadas de un proceso — usada por el flujo de
+/// cierre (Fase 11) para exigir su resolución explícita antes de cerrar.
+pub fn list_upcoming_sessions_by_episode(conn: &Connection, episode_id: &str) -> Result<Vec<SessionListItem>, SessionError> {
+    Ok(sessions::list_upcoming_by_episode(conn, episode_id)?)
+}
+
 /// Cambia únicamente metadata administrativa (fecha, hora, duración,
 /// modalidad, estado). Nunca toca `session_notes` — no crea versión nueva.
 pub fn update_session_metadata(conn: &Connection, id: &str, input: SessionMetadataInput) -> Result<Session, SessionError> {

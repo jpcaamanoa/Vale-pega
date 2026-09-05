@@ -3,6 +3,7 @@
 //! desbloqueada desde la capa de comandos.
 
 pub mod appointments;
+pub mod episode_closures;
 pub mod episode_clinical_profile;
 pub mod goals;
 pub mod patient_clinical_profile;

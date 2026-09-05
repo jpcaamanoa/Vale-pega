@@ -12,6 +12,9 @@ export const therapyTasksApi = {
 
   listPending: (patientId: string) => invoke<TherapyTaskListItem[]>('list_pending_therapy_tasks', { patientId }),
 
+  /** `'pendiente'` + `'parcial'` — usada exclusivamente por la advertencia del flujo de cierre de un proceso (Fase 11). */
+  listPendingOrPartial: (patientId: string) => invoke<TherapyTaskListItem[]>('list_pending_or_partial_therapy_tasks', { patientId }),
+
   update: (id: string, input: TherapyTaskUpdateInput) => invoke<TherapyTask>('update_therapy_task', { id, input }),
 
   review: (id: string, input: TherapyTaskReviewInput) => invoke<TherapyTask>('review_therapy_task', { id, input }),

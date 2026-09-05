@@ -732,6 +732,68 @@ SELECT 'legacy-' || cp.patient_id, cp.presenting_problem, cp.primary_diagnosis_c
 FROM patient_clinical_profile cp;
 "#;
 
+/// V5 (Fase 11): cierre estructurado de un proceso terapéutico — la tabla
+/// que el propio comentario de `SCHEMA_V4` ya anunciaba ("vivirá en una
+/// tabla `episode_closures` separada, todavía sin crear"). Ver
+/// `docs/episode-closure.md` para el diseño completo, resuelto en la
+/// auditoría "Fase 11 — Cierre/Alta estructurado".
+///
+/// Tabla nueva, completamente aditiva — `SCHEMA_V1`–`V4` quedan intactos.
+/// Ningún `ALTER TABLE` sobre `treatment_episodes`, `sessions`,
+/// `therapeutic_goals`, `patients` ni ninguna tabla existente: el estado
+/// operativo del proceso (`activo`/`pausado`/`cerrado`, ya en `SCHEMA_V4`)
+/// se mantiene separado del evento clínico de cierre, que vive aquí.
+///
+/// `reason` y `outcome` son taxonomías cerradas e independientes entre sí
+/// (una derivación puede coexistir con objetivos parcialmente logrados —
+/// nunca se fuerza una combinación). `reason_detail` se usa libremente y es
+/// obligatorio en la capa de servicio cuando `reason = 'otro'`, pero el
+/// `CHECK` de esquema no lo exige (evita duplicar esa regla de negocio en
+/// SQL).
+///
+/// **Inmutable tras crearse** (decisión explícita de la aprobación de Fase
+/// 11: corregir un error de fondo usa anular + crear un cierre nuevo, nunca
+/// editar el contenido de uno existente — a propósito distinto del patrón
+/// mutable de `episode_clinical_profile`). La única escritura posterior
+/// permitida es marcar `reverted_at`/`reverted_reason` (anulación
+/// auditable): la fila original nunca se borra ni se sobrescribe, queda
+/// como historia. `idx_episode_closures_active` (índice único parcial,
+/// mismo patrón exacto que `idx_treatment_episodes_one_active_per_patient`
+/// de `SCHEMA_V4`) garantiza a nivel de base de datos que nunca hay más de
+/// un cierre vigente (no anulado) por proceso, sin impedir conservar
+/// cierres anulados anteriores como historia completa.
+const SCHEMA_V5: &str = r#"
+CREATE TABLE episode_closures (
+  id TEXT PRIMARY KEY,
+  episode_id TEXT NOT NULL REFERENCES treatment_episodes(id) ON DELETE RESTRICT,
+  closed_at TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (reason IN
+    ('alta','cierre_acordado','interrupcion','derivacion','decision_profesional','otro')),
+  reason_detail TEXT,
+  outcome TEXT NOT NULL CHECK (outcome IN
+    ('objetivos_logrados','parcialmente_logrados','no_logrados','no_evaluable')),
+  summary TEXT,
+  recommendations TEXT,
+  reverted_at TEXT,
+  reverted_reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  -- Una anulación siempre lleva motivo, y un cierre vigente nunca tiene
+  -- ninguno de los dos campos de anulación a medias.
+  CHECK ((reverted_at IS NULL AND reverted_reason IS NULL)
+      OR (reverted_at IS NOT NULL AND reverted_reason IS NOT NULL))
+);
+CREATE INDEX idx_episode_closures_episode ON episode_closures(episode_id);
+CREATE UNIQUE INDEX idx_episode_closures_active
+  ON episode_closures(episode_id) WHERE reverted_at IS NULL;
+CREATE TRIGGER trg_episode_closures_touch_updated_at
+AFTER UPDATE ON episode_closures
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE episode_closures SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -741,6 +803,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V2).foreign_key_check(),
         M::up(SCHEMA_V3).foreign_key_check(),
         M::up(SCHEMA_V4).foreign_key_check(),
+        M::up(SCHEMA_V5).foreign_key_check(),
     ])
 }
 
@@ -795,6 +858,7 @@ mod tests {
         "therapy_tasks",
         "treatment_episodes",
         "episode_clinical_profile",
+        "episode_closures",
     ];
 
     fn migrated_vault(name: &str) -> (rusqlite::Connection, std::path::PathBuf, VaultKey) {
@@ -1298,6 +1362,137 @@ mod tests {
             .query_row("SELECT te.started_at, p.created_at FROM treatment_episodes te JOIN patients p ON p.id = te.patient_id WHERE te.id = 'legacy-p2'", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!(p2_started, &p2_created_at[0..10]);
+    }
+
+    #[test]
+    fn v5_migration_creates_episode_closures_and_preserves_v4_data() {
+        let path = temp_db_path("v5-preserves-v4-data");
+        let k = key(0xE8);
+        {
+            let mut conn = open_vault(&path, &k).unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            Migrations::new(vec![
+                M::up(SCHEMA_V1).foreign_key_check(),
+                M::up(SCHEMA_V2).foreign_key_check(),
+                M::up(SCHEMA_V3).foreign_key_check(),
+                M::up(SCHEMA_V4).foreign_key_check(),
+            ])
+            .to_latest(&mut conn)
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+            conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'Paciente Previo A V5')", []).unwrap();
+            conn.execute(
+                "INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('ep1', 'p1', '2025-01-01', 'activo')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).expect("V5 debe aplicarse limpiamente sobre un vault V1-V4 con datos reales");
+
+        let patient_name: String = conn.query_row("SELECT full_name FROM patients WHERE id = 'p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(patient_name, "Paciente Previo A V5");
+        let episode_status: String = conn.query_row("SELECT status FROM treatment_episodes WHERE id = 'ep1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(episode_status, "activo", "V5 no debe modificar el estado de procesos existentes");
+
+        let closures_count: i64 = conn.query_row("SELECT COUNT(*) FROM episode_closures", [], |r| r.get(0)).unwrap();
+        assert_eq!(closures_count, 0, "V5 no crea ningún cierre retroactivo — es puramente aditiva");
+    }
+
+    #[test]
+    fn v5_migration_is_idempotent() {
+        let path = temp_db_path("v5-idempotent");
+        let k = key(0xE9);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('ep1', 'p1', '2026-01-01', 'cerrado')", []).unwrap();
+        conn.execute(
+            "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome) VALUES ('c1', 'ep1', '2026-02-01', 'alta', 'objetivos_logrados')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1-V5 ya vigentes no debería fallar");
+
+        let reason: String = conn.query_row("SELECT reason FROM episode_closures WHERE id = 'c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(reason, "alta");
+    }
+
+    #[test]
+    fn episode_closure_rejects_invalid_reason() {
+        let (conn, _path, _key) = migrated_vault("v5-invalid-reason");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome) VALUES ('c1', 'ep1', '2026-01-05', 'inventado', 'objetivos_logrados')",
+                [],
+            )
+            .expect_err("un motivo fuera de la taxonomía debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    #[test]
+    fn episode_closure_rejects_invalid_outcome() {
+        let (conn, _path, _key) = migrated_vault("v5-invalid-outcome");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome) VALUES ('c1', 'ep1', '2026-01-05', 'alta', 'inventado')",
+                [],
+            )
+            .expect_err("un resultado fuera de la taxonomía debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    #[test]
+    fn a_second_active_closure_for_the_same_episode_is_rejected_at_database_level() {
+        let (conn, _path, _key) = migrated_vault("v5-one-active-closure");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('ep1', 'p1', '2026-01-01', 'cerrado')", []).unwrap();
+        conn.execute(
+            "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome) VALUES ('c1', 'ep1', '2026-02-01', 'alta', 'objetivos_logrados')",
+            [],
+        )
+        .unwrap();
+
+        let err = conn
+            .execute(
+                "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome) VALUES ('c2', 'ep1', '2026-02-02', 'alta', 'objetivos_logrados')",
+                [],
+            )
+            .expect_err("un segundo cierre vigente para el mismo proceso debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+
+        // Pero un segundo cierre ANULADO sí es aceptado — el índice único
+        // parcial solo restringe reverted_at IS NULL. Simula la historia de
+        // un cierre corregido: c1 se anula y c2 pasa a ser el vigente.
+        conn.execute("UPDATE episode_closures SET reverted_at = '2026-02-03T00:00:00.000Z', reverted_reason = 'Motivo incorrecto' WHERE id = 'c1'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome) VALUES ('c2', 'ep1', '2026-02-02', 'derivacion', 'parcialmente_logrados')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn episode_closure_requires_both_or_neither_reverted_fields() {
+        let (conn, _path, _key) = migrated_vault("v5-reverted-pair");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome, reverted_at) \
+                 VALUES ('c1', 'ep1', '2026-01-05', 'alta', 'objetivos_logrados', '2026-01-06T00:00:00.000Z')",
+                [],
+            )
+            .expect_err("reverted_at sin reverted_reason debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
     }
 
     // ---------------------------------------------------------------
