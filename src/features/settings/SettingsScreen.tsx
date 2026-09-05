@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { Button } from '../../components/ui/Button'
 import { Select } from '../../components/ui/Select'
 import { TextField } from '../../components/ui/TextField'
+import { BackupRestoreSection } from '../backup/BackupRestoreSection'
 import { googleCalendarApi } from './api'
 import type { GoogleCalendarListItem, GoogleConnectionStatus } from './types'
 
@@ -249,6 +250,8 @@ export function SettingsScreen() {
           </div>
         )}
       </section>
+
+      <BackupRestoreSection />
 
       {confirmingDisconnect && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 px-4">

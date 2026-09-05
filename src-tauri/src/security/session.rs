@@ -227,6 +227,27 @@ impl VaultSession {
         }
     }
 
+    /// Vuelve a comprobar en disco si hay un vault utilizable en `paths` y
+    /// ajusta el estado en memoria en consecuencia — exactamente el mismo
+    /// criterio que `VaultSession::new`. Pensado exclusivamente para
+    /// `backup::service::restore_backup` (Fase 10): tras reemplazar los
+    /// archivos del vault en disco (una instalación sin vault previo que
+    /// recibe uno restaurado, o un vault existente reemplazado), el estado
+    /// en memoria de esta sesión no se entera solo — nadie más vuelve a
+    /// crear el proceso para que `new()` lo detecte de nuevo.
+    ///
+    /// No hace nada si el estado actual es `Unlocked` o `PendingCreation`:
+    /// nunca se llama en esos casos (`restore_backup` siempre bloquea
+    /// primero), y tocar esos estados aquí sería fuera del propósito único
+    /// de este método.
+    pub fn refresh_from_disk(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, State::Unlocked(_) | State::PendingCreation(_)) {
+            return;
+        }
+        *state = if self.paths.exists() { State::Locked } else { State::NoVault };
+    }
+
     /// Registra actividad de la usuaria (para el bloqueo automático). No
     /// hace nada si el vault no está desbloqueado.
     pub fn record_activity(&self) {

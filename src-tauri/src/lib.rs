@@ -1,3 +1,4 @@
+mod backup;
 mod calendar;
 mod commands;
 mod db;
@@ -22,6 +23,7 @@ const AUTO_LOCK_TICK_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -33,6 +35,13 @@ pub fn run() {
 
       let vault_dir = app.path().app_data_dir()?.join("vault");
       std::fs::create_dir_all(&vault_dir)?;
+
+      // Antes de que `VaultSession` lea el estado del disco (línea
+      // siguiente): recuperar de una posible interrupción a mitad de un
+      // `restore_backup` (Fase 10) — ver
+      // `backup::service::run_startup_recovery`. No hace nada en el caso
+      // normal.
+      backup::service::run_startup_recovery(&vault_dir);
 
       let vault_session: Arc<VaultSession> = Arc::new(VaultSession::new(&vault_dir));
       app.manage(vault_session.clone());
@@ -155,6 +164,9 @@ pub fn run() {
       commands::get_episode_clinical_profile,
       commands::create_episode_clinical_profile,
       commands::update_episode_clinical_profile,
+      commands::create_backup,
+      commands::inspect_backup,
+      commands::restore_backup,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

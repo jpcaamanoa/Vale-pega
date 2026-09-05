@@ -1,5 +1,6 @@
 mod app_info;
 mod appointments;
+mod backup;
 mod calendar;
 mod episode_clinical_profile;
 mod goals;
@@ -14,6 +15,7 @@ mod vault;
 
 pub use app_info::*;
 pub use appointments::*;
+pub use backup::*;
 pub use calendar::*;
 pub use episode_clinical_profile::*;
 pub use goals::*;

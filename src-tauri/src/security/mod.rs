@@ -23,3 +23,13 @@ mod vault_meta;
 
 pub use password_policy::{evaluate as evaluate_password_strength, PasswordStrength};
 pub use session::{VaultSession, VaultStatus};
+
+// Re-exportado únicamente para `backup::service` (Fase 10): validar la
+// contraseña/código de recuperación de un vault en *staging* (una copia
+// restaurada temporal, nunca el vault activo de `VaultSession`) exige
+// llamar exactamente la misma lógica de desenvolvimiento del DEK que ya
+// usa `VaultSession` — nunca una reimplementación paralela. `VaultSession`
+// sigue siendo la única puerta de entrada para el vault *activo*; esto no
+// cambia esa regla, solo permite ejercer la misma lógica pura sobre una
+// ruta de archivo distinta y desechable.
+pub use vault_manager::{recover_access, unlock_vault, RecoveryError, UnlockError, VaultPaths};

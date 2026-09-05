@@ -154,6 +154,18 @@ en vez de introducirlo de paso en una fase enfocada en integridad relacional.
 > cambió la estrategia — queda exactamente como se dejó en la Fase 1.3, con esta evaluación
 > agregada como antecedente para cuando corresponda decidir.
 
+> **Corrección de la Fase 10 (Backup/Restore, 5 de septiembre de 2026) — el motivo original ya no
+> aplica; sigue diferido por una razón distinta.** El backup real ya está implementado
+> (`docs/backup-restore.md`) y **no necesitó activar WAL**: usa `VACUUM INTO` sobre la conexión ya
+> desbloqueada, que produce una copia consistente sin importar el modo de journal — funciona
+> idéntico con el rollback journal por defecto que con WAL. Es decir, la pregunta que esta sección
+> dejaba abierta ("¿se puede implementar backup sin activar WAL?") ya tiene respuesta demostrada:
+> **sí**. El modo WAL sigue sin activarse, pero ahora únicamente como una posible mejora de
+> rendimiento futura, sin ningún síntoma actual que la justifique — no como una dependencia de
+> Backup/Restore. Esta corrección no reescribe la evaluación original (sigue siendo válida como
+> antecedente de lo que se investigó en su momento), solo dejar constancia de que su premisa sobre
+> backup quedó resuelta.
+
 ## Tests ejecutados y resultados
 
 `cargo test` en `src-tauri/`: **29/29 en verde** (11 de la Fase 1.2 sin
