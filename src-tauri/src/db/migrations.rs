@@ -794,6 +794,104 @@ BEGIN
 END;
 "#;
 
+/// V6 (Fase 12): Plan de Seguridad Clínico Versionado — herramienta de
+/// documentación pura (nunca un algoritmo de predicción de riesgo, ni un
+/// sistema de emergencia, ni vigilancia). Ver `docs/safety-plan.md` para el
+/// diseño completo.
+///
+/// Tablas nuevas, completamente aditivas — `SCHEMA_V1`–`V5` quedan intactos,
+/// sin ningún `ALTER TABLE`. `safety_plans` es **por paciente**, nunca por
+/// proceso (`treatment_episodes`): un plan de seguridad tiene sentido
+/// clínico incluso con el proceso cerrado o en un reingreso posterior, así
+/// que deliberadamente no lleva `episode_id`.
+///
+/// Mismo patrón de versionado borrador/vigente/reemplazado ya usado por
+/// `session_notes` (Fase 4) y `episode_closures` (Fase 11), adaptado aquí a
+/// tres estados en vez de dos: `borrador` (editable, nunca es "el plan
+/// vigente"), `vigente` (confirmado, como máximo uno por paciente — mismo
+/// patrón de índice único parcial que `idx_episode_closures_active`) y
+/// `reemplazado` (historia inmutable, nunca se borra ni se sobrescribe). Un
+/// borrador nunca confirmado puede eliminarse (hard delete, en la capa de
+/// servicio); un plan `vigente` o `reemplazado` nunca.
+///
+/// El `CHECK` de coherencia liga `status` a los timestamps de ciclo de vida,
+/// igual que en `episode_closures`: un borrador nunca tiene `confirmed_at`
+/// ni `superseded_at`; un vigente siempre tiene `confirmed_at` y nunca
+/// `superseded_at`; un reemplazado siempre tiene ambos.
+///
+/// `safety_plan_contacts` es una tabla hija (personas de apoyo,
+/// profesionales o servicios) — el contacto de emergencia del paciente
+/// (`patients.emergency_contact_*`) se puede usar para autocompletar al
+/// crear un contacto, pero se copia como snapshot de texto, nunca como
+/// referencia viva: si el contacto de emergencia del paciente cambia
+/// después, un plan ya confirmado no cambia retroactivamente.
+///
+/// Deliberadamente **sin ninguna relación** (ni columna, ni trigger, ni
+/// sincronización en ningún sentido) con `patient_clinical_profile` ni con
+/// ninguna columna de riesgo: este plan nunca infiere, puntúa, colorea ni
+/// prioriza nada automáticamente.
+const SCHEMA_V6: &str = r#"
+CREATE TABLE safety_plans (
+  id TEXT PRIMARY KEY,
+  patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('borrador','vigente','reemplazado')),
+  warning_signs TEXT,
+  internal_strategies TEXT,
+  social_support_strategies TEXT,
+  means_safety TEXT,
+  crisis_steps TEXT,
+  notes TEXT,
+  reviewed_at TEXT,
+  confirmed_at TEXT,
+  superseded_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE (patient_id, version),
+  CHECK (
+    (status = 'borrador'    AND confirmed_at IS NULL     AND superseded_at IS NULL)
+    OR
+    (status = 'vigente'     AND confirmed_at IS NOT NULL AND superseded_at IS NULL)
+    OR
+    (status = 'reemplazado' AND confirmed_at IS NOT NULL AND superseded_at IS NOT NULL)
+  )
+);
+CREATE INDEX idx_safety_plans_patient ON safety_plans(patient_id);
+CREATE UNIQUE INDEX idx_safety_plans_one_current_per_patient
+  ON safety_plans(patient_id) WHERE status = 'vigente';
+-- Mismo criterio que el índice anterior, para el otro extremo del ciclo de
+-- vida: a lo sumo un borrador sin confirmar por paciente a la vez (evita
+-- que dos borradores en paralelo compitan por convertirse en el vigente).
+CREATE UNIQUE INDEX idx_safety_plans_one_draft_per_patient
+  ON safety_plans(patient_id) WHERE status = 'borrador';
+CREATE TRIGGER trg_safety_plans_touch_updated_at
+AFTER UPDATE ON safety_plans
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE safety_plans SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+
+CREATE TABLE safety_plan_contacts (
+  id TEXT PRIMARY KEY,
+  safety_plan_id TEXT NOT NULL REFERENCES safety_plans(id) ON DELETE CASCADE,
+  contact_type TEXT NOT NULL CHECK (contact_type IN ('support_person','professional','service')),
+  name TEXT NOT NULL,
+  relationship_or_role TEXT,
+  phone TEXT,
+  notes TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_safety_plan_contacts_plan ON safety_plan_contacts(safety_plan_id, sort_order);
+CREATE TRIGGER trg_safety_plan_contacts_touch_updated_at
+AFTER UPDATE ON safety_plan_contacts
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE safety_plan_contacts SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -804,6 +902,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V3).foreign_key_check(),
         M::up(SCHEMA_V4).foreign_key_check(),
         M::up(SCHEMA_V5).foreign_key_check(),
+        M::up(SCHEMA_V6).foreign_key_check(),
     ])
 }
 
@@ -859,6 +958,8 @@ mod tests {
         "treatment_episodes",
         "episode_clinical_profile",
         "episode_closures",
+        "safety_plans",
+        "safety_plan_contacts",
     ];
 
     fn migrated_vault(name: &str) -> (rusqlite::Connection, std::path::PathBuf, VaultKey) {

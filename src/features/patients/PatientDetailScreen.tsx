@@ -4,6 +4,7 @@ import { Button } from '../../components/ui/Button'
 import { ClinicalProfileTab } from '../clinical-profile/ClinicalProfileTab'
 import { GoalsTab } from '../goals/GoalsTab'
 import { PaymentsTab } from '../payments/PaymentsTab'
+import { SafetyPlanTab } from '../safety-plan/SafetyPlanTab'
 import { SessionsTab } from '../sessions/SessionsTab'
 import { ProcessesTab } from '../treatment-episodes/ProcessesTab'
 import { patientsApi } from './api'
@@ -19,6 +20,7 @@ type SectionId =
   | 'evaluaciones'
   | 'documentos'
   | 'pagos'
+  | 'plan_seguridad'
   | 'linea_temporal'
 
 const SECTIONS: { id: SectionId; label: string }[] = [
@@ -31,6 +33,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'evaluaciones', label: 'Evaluaciones' },
   { id: 'documentos', label: 'Documentos' },
   { id: 'pagos', label: 'Pagos' },
+  { id: 'plan_seguridad', label: 'Plan de seguridad' },
   { id: 'linea_temporal', label: 'Línea temporal' },
 ]
 
@@ -38,8 +41,9 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 // evaluaciones, etc.) — la navegación ya está preparada para recibirlas sin
 // rehacer la ficha del paciente. "Sesiones" es real desde la Fase 4;
 // "Objetivos" es real desde la Fase 5; "Antecedentes" es real desde la Fase 6;
-// "Pagos" es real desde la Fase 7; "Procesos" es real desde la Fase 9.
-const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'procesos', 'antecedentes', 'sesiones', 'objetivos', 'pagos']
+// "Pagos" es real desde la Fase 7; "Procesos" es real desde la Fase 9;
+// "Plan de seguridad" es real desde la Fase 12.
+const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'procesos', 'antecedentes', 'sesiones', 'objetivos', 'pagos', 'plan_seguridad']
 
 function SummaryRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
@@ -185,6 +189,7 @@ export function PatientDetailScreen() {
           {section === 'sesiones' && id && <SessionsTab patientId={id} patientArchived={isArchived} />}
           {section === 'objetivos' && id && <GoalsTab patientId={id} patientArchived={isArchived} />}
           {section === 'pagos' && id && <PaymentsTab patientId={id} patientArchived={isArchived} />}
+          {section === 'plan_seguridad' && id && <SafetyPlanTab patientId={id} patientArchived={isArchived} />}
         </>
       ) : (
         <p className="py-16 text-center text-sm text-muted-foreground">Próximamente.</p>

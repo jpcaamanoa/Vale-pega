@@ -11,6 +11,7 @@ pub mod patient_prep_notes;
 pub mod patients;
 pub mod payments;
 pub mod rut;
+pub mod safety_plans;
 pub mod sessions;
 pub mod therapy_tasks;
 pub mod treatment_episodes;

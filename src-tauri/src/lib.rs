@@ -175,6 +175,18 @@ pub fn run() {
       commands::create_backup,
       commands::inspect_backup,
       commands::restore_backup,
+      commands::get_current_safety_plan,
+      commands::get_safety_plan_draft,
+      commands::list_safety_plan_history,
+      commands::get_safety_plan_by_id,
+      commands::create_safety_plan_draft,
+      commands::update_safety_plan_draft,
+      commands::discard_safety_plan_draft,
+      commands::confirm_safety_plan_draft,
+      commands::list_safety_plan_contacts,
+      commands::add_safety_plan_contact,
+      commands::update_safety_plan_contact,
+      commands::delete_safety_plan_contact,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

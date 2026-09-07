@@ -13,6 +13,7 @@ pub mod patient_clinical_profile;
 pub mod patient_prep_notes;
 pub mod patients;
 pub mod payments;
+pub mod safety_plans;
 pub mod session_goals;
 pub mod session_notes;
 pub mod sessions;
