@@ -59,3 +59,14 @@ export const PATIENT_STATUS_LABELS: Record<PatientStatus, string> = {
   alta: 'Alta',
   archivado: 'Archivado',
 }
+
+/**
+ * Estados seleccionables manualmente desde el formulario normal de
+ * paciente. `'archivado'` queda fuera a propósito (microcorrección
+ * post-Fase 11): la fuente de verdad de "paciente archivado" es
+ * `deletedAt`, exclusivamente a través de las acciones Archivar/Restaurar
+ * — nunca este campo. Una fila legacy con `status: 'archivado'` (de antes
+ * de esta corrección) sigue siendo válida de leer/actualizar sin forzar un
+ * cambio de valor; ver `PatientForm.tsx`.
+ */
+export const SELECTABLE_PATIENT_STATUSES: PatientStatus[] = ['activo', 'inactivo', 'alta']

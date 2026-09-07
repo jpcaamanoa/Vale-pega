@@ -7,7 +7,7 @@ import { Select } from '../../components/ui/Select'
 import { TextField } from '../../components/ui/TextField'
 import { communesForRegion, EXTRANJERO, REGION_OPTIONS } from './geo'
 import { patientFormSchema, type PatientFormValues } from './schema'
-import { PATIENT_STATUS_LABELS, type Patient } from './types'
+import { PATIENT_STATUS_LABELS, SELECTABLE_PATIENT_STATUSES, type Patient } from './types'
 
 function patientToFormValues(patient?: Patient): Partial<PatientFormValues> {
   if (!patient) return { status: 'activo' }
@@ -75,6 +75,11 @@ export function PatientForm({
   const communeOptions = communesForRegion(selectedRegion)
   const communeDisabled = !selectedRegion || selectedRegion === EXTRANJERO
 
+  // 'archivado' nunca es una elección manual nueva (ver types.ts) — pero si
+  // este paciente ya tenía ese valor de una fila legacy, se conserva como
+  // opción para no perderlo ni forzar un cambio al reabrir el formulario.
+  const statusOptions = patient?.status === 'archivado' ? [...SELECTABLE_PATIENT_STATUSES, 'archivado' as const] : SELECTABLE_PATIENT_STATUSES
+
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-6">
       <Section title="Datos personales">
@@ -130,13 +135,21 @@ export function PatientForm({
       </Section>
 
       <Section title="Información administrativa">
-        <Select label="Estado" {...register('status')} error={errors.status?.message}>
-          {Object.entries(PATIENT_STATUS_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </Select>
+        <div>
+          <Select label="Estado" {...register('status')} error={errors.status?.message}>
+            {statusOptions.map((value) => (
+              <option key={value} value={value}>
+                {PATIENT_STATUS_LABELS[value]}
+              </option>
+            ))}
+          </Select>
+          {patient?.status === 'archivado' && (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Este valor es histórico, de una versión anterior de la aplicación. Para archivar o restaurar a este
+              paciente usa las acciones &quot;Archivar&quot;/&quot;Restaurar&quot; de su ficha.
+            </p>
+          )}
+        </div>
         <TextField label="Derivado por" {...register('referredBy')} error={errors.referredBy?.message} />
         <TextField label="Fecha de ingreso" type="date" {...register('intakeDate')} error={errors.intakeDate?.message} />
       </Section>

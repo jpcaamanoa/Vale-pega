@@ -321,3 +321,86 @@ tests) en `docs/geographic-stats.md` — este archivo solo deja constancia de
 que la extensión existe y de que **`PatientListItem` (el listado) no se
 tocó**: sigue sin RUT (Fase 1.5) y ahora tampoco lleva región/comuna, por el
 mismo principio de minimización de exposición ya documentado arriba.
+
+---
+
+## Microcorrección — unificar la semántica de "archivado" (post-Fase 11)
+
+La auditoría de transición posterior al cierre de Fase 11 detectó un bug
+funcional real: `patients.status` admite el valor `'archivado'` desde
+`SCHEMA_V1` (Fase 1.3) y ese valor era seleccionable manualmente desde el
+formulario normal de paciente (`PatientForm.tsx`), pero el archivado
+estructural real (el que oculta al paciente del listado activo y lo mueve a
+la papelera) depende exclusivamente de `deleted_at`, escrito únicamente por
+`archive_patient`/`restore_patient` (Fase 1.5/1.6) — `status` nunca se toca
+en ese flujo. Un paciente podía quedar con `status='archivado'` y
+`deleted_at=NULL` (seguía apareciendo como activo, pese a que el formulario
+dijera "Archivado") o con `status` distinto de `'archivado'` mientras
+`deleted_at` sí estaba seteado (aparecía en la papelera con un estado que
+no reflejaba su situación real).
+
+**Decisión de producto aprobada**: la fuente de verdad de "paciente
+archivado" sigue siendo, sin ambigüedad, `deleted_at` — nunca `status`. En
+consecuencia, `'archivado'` deja de ser una elección manual válida desde el
+formulario normal, tanto al crear un paciente nuevo como al editar uno
+existente que no tuviera ya ese valor.
+
+### Qué cambió
+
+- **`services::patients`** — nuevo error `PatientValidationError::ArchivedStatusIsNotManuallySelectable`.
+  `validate()` recibe ahora un parámetro `current_status: Option<&str>`
+  (`None` al crear, el `status` ya guardado al actualizar) y rechaza
+  `status = 'archivado'` salvo que ya fuera ese el valor existente del
+  paciente — así una fila legacy (de antes de esta corrección) sigue
+  pudiendo leerse y guardarse sin forzar un cambio de valor, y sin que un
+  paciente **distinto** pueda adquirir `'archivado'` por esta vía.
+  `update_patient` ahora busca primero el paciente existente
+  (`patients::find_by_id`) para conocer su `status` actual antes de validar.
+- **`SCHEMA_V1` no se tocó.** `VALID_STATUSES` (Rust) y el `CHECK` de la
+  base de datos siguen aceptando las 4 palabras (`activo`/`inactivo`/`alta`/
+  `archivado`) exactamente igual que antes — sin migración, sin
+  reescritura de filas existentes, sin ningún cambio de esquema.
+- **`src/features/patients/types.ts`** — nueva constante
+  `SELECTABLE_PATIENT_STATUSES` (`activo`/`inactivo`/`alta`, sin
+  `'archivado'`), separada de `PATIENT_STATUS_LABELS` (que conserva las 4,
+  porque una fila legacy con `status='archivado'` debe poder seguir
+  **mostrándose** con su nombre real en el listado y en el resumen de la
+  ficha).
+- **`PatientForm.tsx`** — el `<Select>` de "Estado" ahora renderiza
+  `SELECTABLE_PATIENT_STATUSES`; si el paciente que se está editando ya
+  tenía `status='archivado'` (fila legacy), esa opción se agrega de vuelta
+  a la lista únicamente para ese formulario, junto con una nota explicando
+  que es un valor histórico y que archivar/restaurar de verdad se hace
+  desde los botones de la ficha — nunca desde este campo.
+
+### Tests nuevos
+
+Agregados a `services::patients::tests`:
+
+- `rejects_creating_a_patient_with_status_archivado`
+- `rejects_updating_a_patient_to_status_archivado_from_a_different_status`
+- `a_legacy_row_with_status_archivado_can_still_be_updated_without_changing_that_status`
+- `a_legacy_row_with_status_archivado_can_transition_to_a_normal_status`
+- `archive_patient_and_restore_patient_never_touch_the_status_column`
+- `updating_a_nonexistent_patient_reports_not_found`
+- `activo_inactivo_and_alta_remain_selectable_on_update`
+
+Suite completa: **577/577 tests en verde** (570 del cierre de Fase 11 + 7
+nuevos), `cargo clippy --release --all-targets` sin advertencias,
+`npm run build`/`npm run lint` sin errores ni categorías nuevas de warning.
+
+### Verificación manual
+
+Sobre un vault de prueba desechable: el formulario de "Nuevo paciente"
+muestra únicamente Activo/Inactivo/Alta en el desplegable "Estado" (sin
+"Archivado"); crear, archivar (papelera), abrir la ficha archivada
+(solo lectura, botón "Restaurar" visible, "Editar" ausente — comportamiento
+preexistente sin cambios) y restaurar funcionan exactamente igual que
+antes, con "Estado" mostrando "Activo" en todo momento — nunca se mezcla
+con el mecanismo real de archivado. Vault real restaurado intacto al
+finalizar.
+
+Ninguna regla de "detenerse" de `CLAUDE.md` se activó: sin cambio de
+esquema, sin migración, sin dependencias nuevas, sin pérdida de datos —
+una corrección de validación en la capa de servicio, ya reforzada también
+en el frontend.

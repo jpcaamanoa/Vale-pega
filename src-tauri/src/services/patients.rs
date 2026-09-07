@@ -22,6 +22,17 @@ const OTHER_CATEGORY_LABEL: &str = "Otras";
 
 pub const VALID_STATUSES: &[&str] = &["activo", "inactivo", "alta", "archivado"];
 const DEFAULT_STATUS: &str = "activo";
+/// La auditoría de transición post-Fase 11 detectó que `'archivado'` era
+/// seleccionable manualmente en el formulario normal sin ejecutar el
+/// archivado estructural real (que depende exclusivamente de `deleted_at`,
+/// vía `archive_patient`/`restore_patient`) — un paciente podía quedar con
+/// `status='archivado'` y `deleted_at=NULL` (sigue apareciendo como activo)
+/// o viceversa. Este valor permanece en `VALID_STATUSES` y en el `CHECK` de
+/// `SCHEMA_V1` **sin ningún cambio de esquema** — filas creadas antes de
+/// esta corrección con `status='archivado'` deben poder seguir
+/// leyéndose/actualizándose sin perder ni alterar ese valor. Lo que cambia
+/// es que ya no puede **elegirse** como una transición nueva: ver `validate`.
+const LEGACY_ARCHIVED_STATUS: &str = "archivado";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +98,11 @@ pub enum PatientValidationError {
     /// La comuna es real, pero no pertenece a la región indicada (p. ej.
     /// Quillota con Región Metropolitana en vez de Región de Valparaíso).
     CommuneNotInRegion { region: String, commune: String },
+    /// `status = 'archivado'` fue enviado como una transición nueva (el
+    /// paciente no lo tenía ya) — nunca es una elección manual válida. La
+    /// fuente de verdad de "archivado" es `deleted_at`
+    /// (`archive_patient`/`restore_patient`), nunca este campo.
+    ArchivedStatusIsNotManuallySelectable,
 }
 
 impl fmt::Display for PatientValidationError {
@@ -112,6 +128,10 @@ impl fmt::Display for PatientValidationError {
             PatientValidationError::CommuneNotInRegion { region, commune } => {
                 write!(f, "'{commune}' no pertenece a la región '{region}'")
             }
+            PatientValidationError::ArchivedStatusIsNotManuallySelectable => write!(
+                f,
+                "el estado 'archivado' no se selecciona manualmente — usa las acciones Archivar/Restaurar de la ficha del paciente"
+            ),
         }
     }
 }
@@ -245,7 +265,14 @@ fn validate_geo(
 
 /// Validación autoritativa: se ejecuta siempre en Rust, sin importar lo que
 /// haya validado (o no) el formulario en React.
-fn validate(input: PatientInput) -> Result<ValidatedFields, PatientValidationError> {
+///
+/// `current_status` es el `status` ya guardado del paciente (`None` al
+/// crear uno nuevo) — se usa exclusivamente para permitir que una fila
+/// legacy con `status='archivado'` (de antes de la corrección de
+/// transición post-Fase 11) se siga guardando sin forzar un cambio de
+/// valor, sin abrir la puerta a que un paciente **distinto** de ese
+/// adquiera `'archivado'` por esta vía.
+fn validate(input: PatientInput, current_status: Option<&str>) -> Result<ValidatedFields, PatientValidationError> {
     let full_name = input.full_name.trim().to_string();
     if full_name.is_empty() {
         return Err(PatientValidationError::EmptyFullName);
@@ -253,6 +280,9 @@ fn validate(input: PatientInput) -> Result<ValidatedFields, PatientValidationErr
 
     let status = input.status.unwrap_or_else(|| DEFAULT_STATUS.to_string());
     validate_status(&status)?;
+    if status == LEGACY_ARCHIVED_STATUS && current_status != Some(LEGACY_ARCHIVED_STATUS) {
+        return Err(PatientValidationError::ArchivedStatusIsNotManuallySelectable);
+    }
 
     let rut = none_if_blank(input.rut);
     let rut = match rut {
@@ -294,7 +324,7 @@ fn validate(input: PatientInput) -> Result<ValidatedFields, PatientValidationErr
 }
 
 pub fn create_patient(conn: &Connection, input: PatientInput) -> Result<Patient, PatientError> {
-    let f = validate(input)?;
+    let f = validate(input, None)?;
     let id = uuid::Uuid::new_v4().to_string();
     let row = NewPatientRow {
         id: &id,
@@ -338,7 +368,8 @@ pub fn list_archived_patients(conn: &Connection, search: Option<String>) -> Resu
 }
 
 pub fn update_patient(conn: &Connection, id: &str, input: PatientInput) -> Result<Patient, PatientError> {
-    let f = validate(input)?;
+    let existing = patients::find_by_id(conn, id)?.ok_or(PatientError::NotFound)?;
+    let f = validate(input, Some(&existing.status))?;
     let row = PatientUpdateRow {
         full_name: &f.full_name,
         preferred_name: f.preferred_name.as_deref(),
@@ -619,6 +650,111 @@ mod tests {
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(!json.contains("rut"));
+    }
+
+    // --- Microcorrección post-Fase 11: 'archivado' no es seleccionable ---
+
+    #[test]
+    fn rejects_creating_a_patient_with_status_archivado() {
+        let conn = test_conn("reject-create-archivado");
+        let mut input = minimal_input("Ana Pérez");
+        input.status = Some("archivado".to_string());
+        let err = create_patient(&conn, input).unwrap_err();
+        assert!(matches!(
+            err,
+            PatientError::Validation(PatientValidationError::ArchivedStatusIsNotManuallySelectable)
+        ));
+    }
+
+    #[test]
+    fn rejects_updating_a_patient_to_status_archivado_from_a_different_status() {
+        let conn = test_conn("reject-update-archivado");
+        let created = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        assert_eq!(created.status, "activo");
+
+        let mut update = minimal_input("Ana Pérez");
+        update.status = Some("archivado".to_string());
+        let err = update_patient(&conn, &created.id, update).unwrap_err();
+        assert!(matches!(
+            err,
+            PatientError::Validation(PatientValidationError::ArchivedStatusIsNotManuallySelectable)
+        ));
+
+        // La fila no debe haber cambiado de estado por el intento rechazado.
+        let unchanged = get_patient(&conn, &created.id).unwrap();
+        assert_eq!(unchanged.status, "activo");
+    }
+
+    #[test]
+    fn a_legacy_row_with_status_archivado_can_still_be_updated_without_changing_that_status() {
+        // Simula una fila legacy anterior a esta corrección: `status =
+        // 'archivado'` escrito directamente (no vía `create_patient`, que ya
+        // lo rechaza), sin que `deleted_at` esté seteado — exactamente la
+        // inconsistencia que detectó la auditoría.
+        let conn = test_conn("legacy-archivado-row");
+        let created = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        conn.execute("UPDATE patients SET status = 'archivado' WHERE id = ?1", rusqlite::params![created.id]).unwrap();
+
+        // Reenviar el mismo status ya existente (como haría el formulario al
+        // reabrir esta fila legacy sin tocar el campo Estado) debe seguir
+        // funcionando — nunca romper la aplicación ni perder datos.
+        let mut update = minimal_input("Ana María Pérez");
+        update.status = Some("archivado".to_string());
+        let updated = update_patient(&conn, &created.id, update).unwrap();
+        assert_eq!(updated.status, "archivado");
+        assert_eq!(updated.full_name, "Ana María Pérez");
+
+        // Sigue pudiendo leerse con normalidad.
+        let fetched = get_patient(&conn, &created.id).unwrap();
+        assert_eq!(fetched.status, "archivado");
+    }
+
+    #[test]
+    fn a_legacy_row_with_status_archivado_can_transition_to_a_normal_status() {
+        let conn = test_conn("legacy-archivado-transition");
+        let created = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        conn.execute("UPDATE patients SET status = 'archivado' WHERE id = ?1", rusqlite::params![created.id]).unwrap();
+
+        let mut update = minimal_input("Ana Pérez");
+        update.status = Some("activo".to_string());
+        let updated = update_patient(&conn, &created.id, update).unwrap();
+        assert_eq!(updated.status, "activo");
+    }
+
+    #[test]
+    fn archive_patient_and_restore_patient_never_touch_the_status_column() {
+        let conn = test_conn("archive-restore-status-untouched");
+        let created = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        assert_eq!(created.status, "activo");
+
+        archive_patient(&conn, &created.id).unwrap();
+        let archived = get_patient_including_deleted(&conn, &created.id).unwrap();
+        assert_eq!(archived.status, "activo", "archivar es exclusivamente deleted_at, nunca status");
+        assert!(archived.deleted_at.is_some());
+
+        restore_patient(&conn, &created.id).unwrap();
+        let restored = get_patient(&conn, &created.id).unwrap();
+        assert_eq!(restored.status, "activo");
+        assert!(restored.deleted_at.is_none());
+    }
+
+    #[test]
+    fn updating_a_nonexistent_patient_reports_not_found() {
+        let conn = test_conn("update-not-found");
+        let err = update_patient(&conn, "no-existe", minimal_input("Ana Pérez")).unwrap_err();
+        assert!(matches!(err, PatientError::NotFound));
+    }
+
+    #[test]
+    fn activo_inactivo_and_alta_remain_selectable_on_update() {
+        let conn = test_conn("selectable-statuses-still-work");
+        let created = create_patient(&conn, minimal_input("Ana Pérez")).unwrap();
+        for status in ["inactivo", "alta", "activo"] {
+            let mut update = minimal_input("Ana Pérez");
+            update.status = Some(status.to_string());
+            let updated = update_patient(&conn, &created.id, update).unwrap();
+            assert_eq!(updated.status, status);
+        }
     }
 
     #[test]
