@@ -8,6 +8,7 @@ pub mod appointments;
 pub mod assessments;
 pub mod episode_closures;
 pub mod episode_clinical_profile;
+pub mod formulations;
 pub mod goal_indicators;
 pub mod goals;
 pub mod patient_clinical_profile;

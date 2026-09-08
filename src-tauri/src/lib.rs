@@ -200,6 +200,14 @@ pub fn run() {
       commands::update_assessment_administration,
       commands::archive_assessment_administration,
       commands::restore_assessment_administration,
+      commands::create_formulation,
+      commands::get_formulation,
+      commands::get_formulation_by_episode,
+      commands::list_formulations,
+      commands::get_current_formulation_version,
+      commands::get_formulation_version,
+      commands::list_formulation_versions,
+      commands::create_formulation_version,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

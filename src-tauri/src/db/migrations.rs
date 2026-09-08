@@ -928,6 +928,49 @@ ALTER TABLE assessment_administrations ADD COLUMN episode_id TEXT
 CREATE INDEX idx_assessment_administrations_episode ON assessment_administrations(episode_id);
 "#;
 
+/// V8 (Fase 15): un solo hueco de `case_formulations` (presente sin cambios
+/// desde `SCHEMA_V1`, nunca revisado) frente a lo que pide el primer
+/// vertical productivo de Formulación — ver
+/// `Plan-Fase-15-pendiente-de-aprobacion.md` para el análisis completo que
+/// motivó esta migración, aprobado explícitamente antes de escribirse.
+///
+/// `episode_id`: mismo patrón exacto que `sessions.episode_id`/
+/// `therapeutic_goals.episode_id` (`SCHEMA_V4`) y
+/// `assessment_administrations.episode_id` (`SCHEMA_V7`) — nulable,
+/// `ON DELETE SET NULL`, vínculo opcional a un proceso terapéutico
+/// concreto. `case_formulations` es anterior a `treatment_episodes` (nació
+/// en `SCHEMA_V1`, `treatment_episodes` en `SCHEMA_V4`) y quedó sin este
+/// vínculo por el mismo motivo documentado explícitamente en
+/// `docs/treatment-episodes.md` para varias tablas más: "ninguna necesidad
+/// concreta lo exigió durante la implementación real" — no había todavía
+/// ningún vertical productivo de Formulación. Fase 15 es ese momento.
+///
+/// La decisión de producto (Fase 15, aprobada explícitamente) es que la
+/// formulación es del **proceso terapéutico**, no solo del paciente: el
+/// motivo de consulta y las hipótesis clínicas pueden cambiar entre
+/// reingresos, y una formulación del proceso anterior nunca debe aparecer
+/// como si fuera automáticamente la vigente del proceso nuevo.
+/// `idx_case_formulations_one_per_episode` (índice único parcial, mismo
+/// patrón exacto que `idx_treatment_episodes_one_active_per_patient` de
+/// `SCHEMA_V4`, `idx_episode_closures_active` de `SCHEMA_V5` e
+/// `idx_safety_plans_one_current_per_patient` de `SCHEMA_V6`) garantiza a
+/// nivel de base de datos que existe como máximo una formulación
+/// "principal" por proceso — nunca varias formulaciones compitiendo por
+/// ese mismo proceso.
+///
+/// Puramente aditiva — `SCHEMA_V1`–`V7` quedan intactos, ninguna columna
+/// existente cambia de tipo ni de restricción, ninguna fila existente
+/// pierde nada (recibe `NULL` en la columna nueva — en la práctica, ninguna
+/// fila real existe todavía en ningún ambiente, porque no había ninguna
+/// vertical productiva de Formulación antes de esta fase).
+const SCHEMA_V8: &str = r#"
+ALTER TABLE case_formulations ADD COLUMN episode_id TEXT
+  REFERENCES treatment_episodes(id) ON DELETE SET NULL;
+CREATE INDEX idx_case_formulations_episode ON case_formulations(episode_id);
+CREATE UNIQUE INDEX idx_case_formulations_one_per_episode
+  ON case_formulations(episode_id) WHERE episode_id IS NOT NULL AND deleted_at IS NULL;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -940,6 +983,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V5).foreign_key_check(),
         M::up(SCHEMA_V6).foreign_key_check(),
         M::up(SCHEMA_V7).foreign_key_check(),
+        M::up(SCHEMA_V8).foreign_key_check(),
     ])
 }
 
@@ -1702,6 +1746,66 @@ mod tests {
         assert_eq!(abbreviation, "BDI-II");
         assert_eq!(category, "Depresión");
         assert_eq!(episode_id, "ep1");
+    }
+
+    // ---------------------------------------------------------------
+    // 2f (Fase 15): migración V8 — episode_id en case_formulations — es
+    // aditiva y no destructiva sobre un vault con datos ya insertados.
+    // ---------------------------------------------------------------
+    #[test]
+    fn fresh_database_has_v8_columns() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v8");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(case_formulations)").unwrap();
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(cols.contains(&"episode_id".to_string()), "case_formulations debe tener episode_id desde el arranque");
+    }
+
+    #[test]
+    fn v8_migration_is_idempotent_and_preserves_v1_formulation_data() {
+        let path = temp_db_path("v8-idempotent");
+        let k = key(0xE8);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO case_formulations (id, patient_id, title) VALUES ('f1', 'p1', 'Formulación inicial')", []).unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1..V8 ya vigentes no debería fallar");
+
+        let episode_id: Option<String> = conn.query_row("SELECT episode_id FROM case_formulations WHERE id = 'f1'", [], |r| r.get(0)).unwrap();
+        assert!(episode_id.is_none(), "una fila anterior a V8 recibe NULL, nunca un valor inventado");
+
+        let title: String = conn.query_row("SELECT title FROM case_formulations WHERE id = 'f1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "Formulación inicial", "el dato de V1 no se pierde ni se altera al migrar a V8");
+    }
+
+    #[test]
+    fn case_formulation_can_link_to_a_treatment_episode_of_the_same_patient() {
+        let (conn, _path, _key) = migrated_vault("v8-episode-link");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        conn.execute("INSERT INTO case_formulations (id, patient_id, title, episode_id) VALUES ('f1', 'p1', 'Formulación', 'ep1')", []).unwrap();
+
+        let episode_id: String = conn.query_row("SELECT episode_id FROM case_formulations WHERE id = 'f1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(episode_id, "ep1");
+    }
+
+    #[test]
+    fn a_second_formulation_for_the_same_episode_is_rejected_at_database_level() {
+        let (conn, _path, _key) = migrated_vault("v8-one-per-episode");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        conn.execute("INSERT INTO case_formulations (id, patient_id, title, episode_id) VALUES ('f1', 'p1', 'Formulación', 'ep1')", []).unwrap();
+
+        let err = conn
+            .execute("INSERT INTO case_formulations (id, patient_id, title, episode_id) VALUES ('f2', 'p1', 'Otra formulación', 'ep1')", [])
+            .expect_err("una segunda formulación para el mismo proceso debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+
+        // Pero sin episode_id (formulaciones "sueltas") el índice único
+        // parcial no aplica — solo restringe episode_id IS NOT NULL.
+        conn.execute("INSERT INTO case_formulations (id, patient_id, title) VALUES ('f3', 'p1', 'Formulación sin proceso')", [])
+            .unwrap();
     }
 
     // ---------------------------------------------------------------
