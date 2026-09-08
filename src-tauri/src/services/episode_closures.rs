@@ -158,10 +158,6 @@ fn validate_date_format(value: &str) -> bool {
         }
 }
 
-fn today_utc_date(conn: &Connection) -> rusqlite::Result<String> {
-    conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0))
-}
-
 fn require_closable_episode(conn: &Connection, episode_id: &str) -> Result<TreatmentEpisode, EpisodeClosureError> {
     let episode = treatment_episodes::find_by_id(conn, episode_id)?.ok_or(EpisodeClosureError::EpisodeNotFound)?;
     if episode.deleted_at.is_some() {
@@ -187,7 +183,7 @@ pub fn close_episode(conn: &Connection, episode_id: &str, input: CloseEpisodeInp
             }
             d
         }
-        _ => today_utc_date(conn)?,
+        _ => episode_closures::today_utc_date(conn)?,
     };
     if closed_at.as_str() < episode.started_at.as_str() {
         return Err(EpisodeClosureError::ClosedBeforeStarted);
@@ -355,6 +351,20 @@ mod tests {
 
     fn minimal_input() -> CloseEpisodeInput {
         CloseEpisodeInput { closed_at: None, reason: "alta".to_string(), reason_detail: None, outcome: "objetivos_logrados".to_string(), summary: None, recommendations: None, session_resolutions: vec![] }
+    }
+
+    /// Evidencia de cero cambio de comportamiento tras el hardening que movió
+    /// `today_utc_date` a `repositories::episode_closures`: omitir `closedAt`
+    /// sigue usando la fecha de hoy en UTC, no una fecha inventada ni vacía.
+    #[test]
+    fn omitting_closed_at_defaults_to_todays_utc_date() {
+        let conn = test_conn("close-defaults-to-today");
+        let patient_id = create_test_patient(&conn, "Paciente Veintidós");
+        let episode_id = create_test_episode_with_status(&conn, &patient_id, "activo");
+        let expected_today: String = conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0)).unwrap();
+
+        let (closure, _) = close_episode(&conn, &episode_id, minimal_input()).unwrap();
+        assert_eq!(closure.closed_at, expected_today);
     }
 
     #[test]

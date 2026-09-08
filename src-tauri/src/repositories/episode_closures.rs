@@ -42,6 +42,18 @@ pub struct NewEpisodeClosureRow<'a> {
 const CLOSURE_COLUMNS: &str = "id, episode_id, closed_at, reason, reason_detail, outcome, summary, recommendations, \
      reverted_at, reverted_reason, created_at, updated_at";
 
+/// Fecha de hoy en UTC, calculada por SQLite — usada por
+/// `services::episode_closures::close_episode` cuando `closed_at` no viene
+/// informado. Vivía antes directamente en la capa de servicio (violación
+/// menor de la regla "SQL solo en repositories", detectada en la auditoría
+/// de transición post-Fase 13); movida aquí sin ningún cambio de
+/// comportamiento — misma consulta exacta, mismo criterio UTC ya aceptado
+/// en el resto del proyecto (ver limitación documentada en
+/// `docs/db-schema.md` para `date('now')` en Pagos).
+pub fn today_utc_date(conn: &Connection) -> rusqlite::Result<String> {
+    conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0))
+}
+
 fn map_row(row: &Row) -> rusqlite::Result<EpisodeClosure> {
     Ok(EpisodeClosure {
         id: row.get(0)?,
@@ -151,6 +163,17 @@ mod tests {
 
     fn minimal_closure_row<'a>(id: &'a str, episode_id: &'a str) -> NewEpisodeClosureRow<'a> {
         NewEpisodeClosureRow { id, episode_id, closed_at: "2026-02-01", reason: "alta", reason_detail: None, outcome: "objetivos_logrados", summary: None, recommendations: None }
+    }
+
+    /// Evidencia de que mover `today_utc_date` desde `services::episode_closures`
+    /// (hardening de capas, auditoría post-Fase 13) no cambió el criterio de
+    /// fecha: sigue siendo el `strftime('%Y-%m-%d','now')` nativo de SQLite,
+    /// en formato `AAAA-MM-DD`.
+    #[test]
+    fn today_utc_date_matches_sqlites_own_current_date() {
+        let conn = test_conn("today-utc-date");
+        let expected: String = conn.query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0)).unwrap();
+        assert_eq!(today_utc_date(&conn).unwrap(), expected);
     }
 
     #[test]

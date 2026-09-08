@@ -299,13 +299,16 @@ paciente de prueba original permaneció intacto tras el intento fallido.
 
 ## Exclusiones explícitas de esta fase
 
-Historial de cierres visible en una pantalla dedicada de la UI (existe `episodeClosuresApi.listHistory`
-en la capa de API y está cubierto por tests de servicio/repositorio, pero no se construyó una vista
-específica más allá del cierre vigente — ver Limitaciones), taxonomía de riesgo clínico o motor de
-riesgo, deprecación física de `patients.status = 'alta'`, corrección de la inconsistencia
-preexistente `patients.status` vs. `deleted_at`, estadísticas de cierres, Sync, iOS/iPadOS,
-cualquier cambio a Google Calendar/OAuth, Export/PDF/Documentos/Evaluaciones/Formulación/Plan de
-seguridad/Derivaciones como funcionalidad separada/Plantillas/Boletas.
+Taxonomía de riesgo clínico o motor de riesgo, deprecación física de `patients.status = 'alta'`,
+corrección de la inconsistencia preexistente `patients.status` vs. `deleted_at`, estadísticas de
+cierres, Sync, iOS/iPadOS, cualquier cambio a Google Calendar/OAuth,
+Export/PDF/Documentos/Evaluaciones/Formulación/Plan de seguridad/Derivaciones como funcionalidad
+separada/Plantillas/Boletas.
+
+**Corrección post-Fase 13 (microfase "Fase 14 — Historial de cierres y hardening longitudinal"):**
+la vista dedicada de historial de cierres, excluida explícitamente de esta fase (ver Limitaciones
+más abajo), se construyó en esa microfase (`ClosureHistorySection.tsx`) sin ningún cambio de
+esquema ni de las reglas de negocio aquí descritas.
 
 ## Archivos creados o modificados
 
@@ -392,13 +395,11 @@ todos revisados en el mismo flujo sin cambios de comportamiento respecto a fases
 
 ## Limitaciones y decisiones que quedan pendientes de aprobación
 
-- **Sin pantalla dedicada de historial de cierres.** `episodeClosuresApi.listHistory` existe y está
-  cubierta por tests de repositorio/servicio (incluido el caso con dos cierres — uno anulado, uno
-  vigente — para el mismo proceso), pero la UI de esta fase solo renderiza el cierre **vigente**.
-  Un proceso con más de un cierre en su historia (tras una corrección) no tiene hoy una vista para
-  repasar los cierres anulados anteriores desde la interfaz — verificable únicamente por evidencia
-  de test/DB en esta fase. Se documenta como limitación explícita, no como algo "verificado" que no
-  lo está: cualquier fase futura que agregue esa vista debe presentarse como su propio cambio.
+- ~~Sin pantalla dedicada de historial de cierres.~~ **Resuelto en la microfase "Fase 14 —
+  Historial de cierres y hardening longitudinal"**: `ClosureHistorySection.tsx` muestra los
+  cierres anulados de un proceso (el vigente sigue viviendo solo en `ClosureSection`, sin
+  duplicarse), usando `episodeClosuresApi.listHistory` sin ningún cambio de esquema ni de las
+  reglas de negocio de esta fase.
 - La verificación de aislamiento de Google Calendar es estructural (inspección de código +
   ausencia total de referencias), no una prueba contra una cuenta de Google real — no había
   credenciales configuradas en el entorno de prueba.

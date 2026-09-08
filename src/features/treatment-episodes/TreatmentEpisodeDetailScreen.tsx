@@ -7,6 +7,7 @@ import { TextField } from '../../components/ui/TextField'
 import { Textarea } from '../../components/ui/Textarea'
 import { formatSessionDate } from '../sessions/datetime'
 import { episodeClinicalProfileApi, treatmentEpisodesApi } from './api'
+import { ClosureHistorySection } from './ClosureHistorySection'
 import { ClosureSection } from './ClosureSection'
 import { episodeClinicalProfileFormSchema, type EpisodeClinicalProfileFormValues } from './schema'
 import { TREATMENT_EPISODE_STATUS_LABELS, type EpisodeClinicalProfile, type EpisodeClinicalProfileInput, type TreatmentEpisode } from './types'
@@ -83,7 +84,9 @@ function EpisodeClinicalProfileForm({
 /**
  * Detalle de un proceso terapéutico (Fase 9, cierre estructurado agregado
  * en Fase 11). El cierre (`ClosureSection`) es un evento clínico distinto
- * del proceso mismo — ver `docs/episode-closure.md`.
+ * del proceso mismo — ver `docs/episode-closure.md`. `ClosureHistorySection`
+ * (Fase 14) muestra los cierres anulados de este mismo proceso — nunca
+ * repite el cierre vigente, que ya vive en `ClosureSection`.
  */
 export function TreatmentEpisodeDetailScreen() {
   const { patientId, episodeId } = useParams<{ patientId: string; episodeId: string }>()
@@ -190,6 +193,7 @@ export function TreatmentEpisodeDetailScreen() {
       {statusError && <p className="mb-6 text-sm text-danger">{statusError}</p>}
 
       <ClosureSection patientId={patientId ?? ''} episode={episode} isArchived={isArchived} onEpisodeUpdated={setEpisode} />
+      <ClosureHistorySection episodeId={episode.id} />
 
       {editingProfile ? (
         <EpisodeClinicalProfileForm
