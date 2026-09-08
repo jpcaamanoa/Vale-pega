@@ -48,6 +48,14 @@ pub fn create_safety_plan_draft(patient_id: String, input: SafetyPlanInput, stat
     state.with_connection(|conn| safety_plans::create_draft(conn, &patient_id, input)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
 }
 
+/// "Actualizar plan": crea un borrador nuevo, copia completa e
+/// independiente del vigente actual (contenido narrativo, `reviewedAt` y
+/// contactos con IDs nuevos) — micro-hardening post-Fase 12.
+#[tauri::command]
+pub fn create_safety_plan_draft_from_current(patient_id: String, state: State<'_, SharedVaultSession>) -> Result<SafetyPlan, String> {
+    state.with_connection(|conn| safety_plans::create_draft_from_current(conn, &patient_id)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn update_safety_plan_draft(plan_id: String, input: SafetyPlanInput, state: State<'_, SharedVaultSession>) -> Result<SafetyPlan, String> {
     state.with_connection(|conn| safety_plans::update_draft(conn, &plan_id, input)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())

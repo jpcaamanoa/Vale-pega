@@ -41,6 +41,11 @@ pub struct NewSafetyPlanRow<'a> {
     pub means_safety: Option<&'a str>,
     pub crisis_steps: Option<&'a str>,
     pub notes: Option<&'a str>,
+    /// Solo se usa al crear un borrador que parte de una copia de otra
+    /// versión (`create_draft_from_current`, micro-hardening post-Fase 12);
+    /// una creación en blanco normal pasa `None` — el primer guardado real
+    /// del borrador (`update_draft`) ya lo persiste de todas formas.
+    pub reviewed_at: Option<&'a str>,
 }
 
 pub struct SafetyPlanDraftUpdateRow<'a> {
@@ -129,8 +134,8 @@ pub fn list_history_summaries_by_patient(conn: &Connection, patient_id: &str) ->
 pub fn insert(conn: &Connection, row: &NewSafetyPlanRow) -> rusqlite::Result<SafetyPlan> {
     conn.execute(
         "INSERT INTO safety_plans (id, patient_id, version, status, warning_signs, internal_strategies, \
-         social_support_strategies, means_safety, crisis_steps, notes) \
-         VALUES (?1, ?2, ?3, 'borrador', ?4, ?5, ?6, ?7, ?8, ?9)",
+         social_support_strategies, means_safety, crisis_steps, notes, reviewed_at) \
+         VALUES (?1, ?2, ?3, 'borrador', ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             row.id,
             row.patient_id,
@@ -140,7 +145,8 @@ pub fn insert(conn: &Connection, row: &NewSafetyPlanRow) -> rusqlite::Result<Saf
             row.social_support_strategies,
             row.means_safety,
             row.crisis_steps,
-            row.notes
+            row.notes,
+            row.reviewed_at
         ],
     )?;
     find_by_id(conn, row.id).map(|opt| opt.expect("se acaba de insertar"))
@@ -353,7 +359,7 @@ mod tests {
     fn minimal_row<'a>(id: &'a str, patient_id: &'a str, version: i64) -> NewSafetyPlanRow<'a> {
         NewSafetyPlanRow {
             id, patient_id, version, warning_signs: None, internal_strategies: None,
-            social_support_strategies: None, means_safety: None, crisis_steps: None, notes: None,
+            social_support_strategies: None, means_safety: None, crisis_steps: None, notes: None, reviewed_at: None,
         }
     }
 
@@ -492,7 +498,7 @@ mod tests {
             &conn,
             &NewSafetyPlanRow {
                 id: "p1", patient_id: &patient_id, version: 1, warning_signs: Some("Señales sensibles"),
-                internal_strategies: None, social_support_strategies: None, means_safety: Some("Detalle sensible"), crisis_steps: None, notes: None,
+                internal_strategies: None, social_support_strategies: None, means_safety: Some("Detalle sensible"), crisis_steps: None, notes: None, reviewed_at: None,
             },
         )
         .unwrap();

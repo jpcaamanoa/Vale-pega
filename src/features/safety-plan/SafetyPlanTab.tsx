@@ -490,19 +490,10 @@ export function SafetyPlanTab({ patientId, patientArchived }: { patientId: strin
   }
 
   const startUpdate = async () => {
-    if (!current) return
     setCreating(true)
     setError(null)
     try {
-      const newDraft = await safetyPlanApi.createDraft(patientId, {
-        warningSigns: current.warningSigns,
-        internalStrategies: current.internalStrategies,
-        socialSupportStrategies: current.socialSupportStrategies,
-        meansSafety: current.meansSafety,
-        crisisSteps: current.crisisSteps,
-        notes: current.notes,
-        reviewedAt: current.reviewedAt,
-      })
+      const newDraft = await safetyPlanApi.createDraftFromCurrent(patientId)
       setDraft(newDraft)
       setView('edit')
     } catch (err) {

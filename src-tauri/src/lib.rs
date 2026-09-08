@@ -180,6 +180,7 @@ pub fn run() {
       commands::list_safety_plan_history,
       commands::get_safety_plan_by_id,
       commands::create_safety_plan_draft,
+      commands::create_safety_plan_draft_from_current,
       commands::update_safety_plan_draft,
       commands::discard_safety_plan_draft,
       commands::confirm_safety_plan_draft,

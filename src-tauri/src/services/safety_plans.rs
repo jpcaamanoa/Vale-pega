@@ -67,6 +67,7 @@ pub enum SafetyPlanError {
     PatientNotFound,
     PatientArchived,
     AlreadyHasDraft,
+    NoCurrentPlan,
     PlanNotFound,
     NotEditable,
     DateFormat,
@@ -82,6 +83,7 @@ impl fmt::Display for SafetyPlanError {
             SafetyPlanError::PatientNotFound => write!(f, "paciente no encontrado"),
             SafetyPlanError::PatientArchived => write!(f, "no se puede crear un plan de seguridad nuevo para un paciente archivado"),
             SafetyPlanError::AlreadyHasDraft => write!(f, "este paciente ya tiene un borrador de plan de seguridad sin confirmar"),
+            SafetyPlanError::NoCurrentPlan => write!(f, "este paciente todavía no tiene un plan de seguridad vigente para actualizar"),
             SafetyPlanError::PlanNotFound => write!(f, "plan de seguridad no encontrado"),
             SafetyPlanError::NotEditable => write!(f, "solo un borrador puede editarse — este plan ya está confirmado"),
             SafetyPlanError::DateFormat => write!(f, "fecha inválida (formato esperado: AAAA-MM-DD)"),
@@ -165,6 +167,28 @@ fn require_draft(conn: &Connection, plan_id: &str) -> Result<SafetyPlan, SafetyP
     Ok(plan)
 }
 
+fn require_not_archived(conn: &Connection, patient_id: &str) -> Result<(), SafetyPlanError> {
+    let patient = require_existing_patient(conn, patient_id)?;
+    if patient.deleted_at.is_some() {
+        return Err(SafetyPlanError::PatientArchived);
+    }
+    Ok(())
+}
+
+/// Un borrador solo es editable (contenido, contactos, confirmación) si
+/// además de estar en estado `borrador`, su paciente no está archivado.
+/// Micro-hardening post-Fase 12: descartar un borrador queda
+/// deliberadamente **fuera** de esta función — decisión de producto
+/// explícita (descartar no crea ni modifica historia clínica confirmada,
+/// mismo criterio que el resto del código nunca bloquea eliminar/editar
+/// contenido no confirmado de un paciente archivado — ver
+/// `discard_draft`).
+fn require_editable_draft(conn: &Connection, plan_id: &str) -> Result<SafetyPlan, SafetyPlanError> {
+    let plan = require_draft(conn, plan_id)?;
+    require_not_archived(conn, &plan.patient_id)?;
+    Ok(plan)
+}
+
 /// El plan vigente de un paciente, si existe. `None` es el estado inicial
 /// normal — la ausencia de un plan de seguridad nunca bloquea ningún otro
 /// flujo de la aplicación.
@@ -234,15 +258,80 @@ pub fn create_draft(conn: &Connection, patient_id: &str, input: SafetyPlanInput)
             means_safety: f.means_safety.as_deref(),
             crisis_steps: f.crisis_steps.as_deref(),
             notes: f.notes.as_deref(),
+            reviewed_at: f.reviewed_at.as_deref(),
         },
     )?)
 }
 
+/// Crea un borrador nuevo precargado con una copia **completa e
+/// independiente** del plan vigente actual — contenido narrativo,
+/// `reviewed_at` y contactos (con IDs nuevos, nunca compartiendo filas con
+/// el vigente). Es el camino real detrás de "Actualizar plan": micro-
+/// hardening post-Fase 12, motivado por que el frontend por sí solo
+/// precargaba únicamente el texto y dejaba los contactos vacíos en
+/// silencio, con riesgo real de que la red de apoyo de la versión anterior
+/// se perdiera al confirmar la nueva sin que la profesional lo advirtiera.
+///
+/// Editar los contactos de la v2 después de esta copia nunca toca los de
+/// la v1 (ni viceversa): son filas físicamente distintas desde el momento
+/// de la copia, verificado en test.
+pub fn create_draft_from_current(conn: &Connection, patient_id: &str) -> Result<SafetyPlan, SafetyPlanError> {
+    let patient = require_existing_patient(conn, patient_id)?;
+    if patient.deleted_at.is_some() {
+        return Err(SafetyPlanError::PatientArchived);
+    }
+    if safety_plans::find_draft_by_patient(conn, patient_id)?.is_some() {
+        return Err(SafetyPlanError::AlreadyHasDraft);
+    }
+    let current = safety_plans::find_current_by_patient(conn, patient_id)?.ok_or(SafetyPlanError::NoCurrentPlan)?;
+
+    let next_version = safety_plans::max_version_for_patient(conn, patient_id)? + 1;
+    let new_id = uuid::Uuid::new_v4().to_string();
+
+    let tx = conn.unchecked_transaction()?;
+    safety_plans::insert(
+        &tx,
+        &NewSafetyPlanRow {
+            id: &new_id,
+            patient_id,
+            version: next_version,
+            warning_signs: current.warning_signs.as_deref(),
+            internal_strategies: current.internal_strategies.as_deref(),
+            social_support_strategies: current.social_support_strategies.as_deref(),
+            means_safety: current.means_safety.as_deref(),
+            crisis_steps: current.crisis_steps.as_deref(),
+            notes: current.notes.as_deref(),
+            reviewed_at: current.reviewed_at.as_deref(),
+        },
+    )?;
+    for contact in safety_plans::list_contacts_by_plan(&tx, &current.id)? {
+        safety_plans::insert_contact(
+            &tx,
+            &NewSafetyPlanContactRow {
+                id: &uuid::Uuid::new_v4().to_string(),
+                safety_plan_id: &new_id,
+                contact_type: &contact.contact_type,
+                name: &contact.name,
+                relationship_or_role: contact.relationship_or_role.as_deref(),
+                phone: contact.phone.as_deref(),
+                notes: contact.notes.as_deref(),
+                sort_order: contact.sort_order,
+            },
+        )?;
+    }
+    let new_draft = safety_plans::find_by_id(&tx, &new_id)?.expect("se acaba de insertar");
+    tx.commit()?;
+    Ok(new_draft)
+}
+
 /// Reemplaza el contenido de un borrador existente. Nunca sobre un plan ya
 /// confirmado — inmutabilidad reforzada también a nivel de SQL en
-/// `repositories::safety_plans::update_draft`.
+/// `repositories::safety_plans::update_draft`. Rechaza también un paciente
+/// archivado **después** de creado el borrador (micro-hardening post-Fase
+/// 12: `require_draft` por sí sola no lo comprobaba — la autoridad real
+/// vive aquí, no solo en que React oculte el botón).
 pub fn update_draft(conn: &Connection, plan_id: &str, input: SafetyPlanInput) -> Result<SafetyPlan, SafetyPlanError> {
-    require_draft(conn, plan_id)?;
+    require_editable_draft(conn, plan_id)?;
     let f = validate_input(input)?;
     let row = SafetyPlanDraftUpdateRow {
         warning_signs: f.warning_signs.as_deref(),
@@ -269,9 +358,10 @@ pub fn discard_draft(conn: &Connection, plan_id: &str) -> Result<(), SafetyPlanE
 
 /// Confirma un borrador: si el paciente ya tenía un plan vigente, lo marca
 /// `reemplazado` primero — dentro de la misma transacción, así nunca hay un
-/// instante con dos vigentes a la vez.
+/// instante con dos vigentes a la vez. Rechaza también un paciente
+/// archivado (micro-hardening post-Fase 12 — ver `update_draft`).
 pub fn confirm_draft(conn: &Connection, plan_id: &str) -> Result<SafetyPlan, SafetyPlanError> {
-    let draft = require_draft(conn, plan_id)?;
+    let draft = require_editable_draft(conn, plan_id)?;
 
     let tx = conn.unchecked_transaction()?;
     if let Some(current) = safety_plans::find_current_by_patient(&tx, &draft.patient_id)? {
@@ -298,10 +388,11 @@ fn validate_contact_input(input: &SafetyPlanContactInput) -> Result<(), SafetyPl
     Ok(())
 }
 
-/// Solo puede agregarse un contacto a un plan todavía en borrador — mismo
-/// criterio de inmutabilidad que el contenido del propio plan.
+/// Solo puede agregarse un contacto a un plan todavía en borrador de un
+/// paciente no archivado — mismo criterio de inmutabilidad/archivado que el
+/// contenido narrativo del propio borrador.
 pub fn add_contact(conn: &Connection, plan_id: &str, input: SafetyPlanContactInput) -> Result<SafetyPlanContact, SafetyPlanError> {
-    require_draft(conn, plan_id)?;
+    require_editable_draft(conn, plan_id)?;
     validate_contact_input(&input)?;
 
     let existing = safety_plans::list_contacts_by_plan(conn, plan_id)?;
@@ -323,7 +414,7 @@ pub fn add_contact(conn: &Connection, plan_id: &str, input: SafetyPlanContactInp
 
 fn require_contact_on_draft(conn: &Connection, contact_id: &str) -> Result<SafetyPlanContact, SafetyPlanError> {
     let contact = safety_plans::find_contact_by_id(conn, contact_id)?.ok_or(SafetyPlanError::ContactNotFound)?;
-    require_draft(conn, &contact.safety_plan_id)?;
+    require_editable_draft(conn, &contact.safety_plan_id)?;
     Ok(contact)
 }
 
@@ -480,6 +571,30 @@ mod tests {
         assert!(matches!(err, SafetyPlanError::PlanNotFound));
     }
 
+    /// Micro-hardening post-Fase 12: `update_draft` debe rechazar un
+    /// paciente archivado **después** de creado el borrador — no solo en el
+    /// momento de crearlo.
+    #[test]
+    fn rejects_updating_a_draft_after_the_patient_is_archived() {
+        let conn = test_conn("update-archived-after-creation");
+        let patient_id = create_test_patient(&conn, "Paciente Archivado Update");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+        let err = update_draft(&conn, &plan.id, full_input()).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::PatientArchived));
+    }
+
+    #[test]
+    fn allows_updating_a_draft_again_after_the_patient_is_restored() {
+        let conn = test_conn("update-restored");
+        let patient_id = create_test_patient(&conn, "Paciente Restaurado Update");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+        patients_service::restore_patient(&conn, &patient_id).unwrap();
+        let updated = update_draft(&conn, &plan.id, full_input()).unwrap();
+        assert_eq!(updated.crisis_steps.as_deref(), Some("1. Llamar a la línea de ayuda"));
+    }
+
     // ---- descartar borrador ----
 
     #[test]
@@ -514,6 +629,21 @@ mod tests {
         confirm_draft(&conn, &plan.id).unwrap();
         let err = discard_draft(&conn, &plan.id).unwrap_err();
         assert!(matches!(err, SafetyPlanError::NotEditable));
+    }
+
+    /// Decisión de producto explícita del micro-hardening post-Fase 12:
+    /// descartar un borrador **sí** se permite aunque el paciente esté
+    /// archivado — no crea ni modifica historia clínica confirmada, mismo
+    /// criterio que el resto del código nunca bloquea eliminar/editar
+    /// contenido no confirmado de un paciente archivado.
+    #[test]
+    fn allows_discarding_a_draft_even_if_the_patient_is_archived() {
+        let conn = test_conn("discard-archived-allowed");
+        let patient_id = create_test_patient(&conn, "Paciente Descarte Archivado");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+        discard_draft(&conn, &plan.id).unwrap();
+        assert!(get_draft(&conn, &patient_id).unwrap().is_none());
     }
 
     // ---- confirmar ----
@@ -555,6 +685,30 @@ mod tests {
         confirm_draft(&conn, &plan.id).unwrap();
         let err = confirm_draft(&conn, &plan.id).unwrap_err();
         assert!(matches!(err, SafetyPlanError::NotEditable));
+    }
+
+    /// Micro-hardening post-Fase 12: `confirm_draft` debe rechazar un
+    /// paciente archivado **después** de creado el borrador.
+    #[test]
+    fn rejects_confirming_a_draft_after_the_patient_is_archived() {
+        let conn = test_conn("confirm-archived-after-creation");
+        let patient_id = create_test_patient(&conn, "Paciente Archivado Confirm");
+        let plan = create_draft(&conn, &patient_id, full_input()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+        let err = confirm_draft(&conn, &plan.id).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::PatientArchived));
+        assert!(get_current_plan(&conn, &patient_id).unwrap().is_none(), "no debe haber quedado confirmado a medias");
+    }
+
+    #[test]
+    fn allows_confirming_a_draft_again_after_the_patient_is_restored() {
+        let conn = test_conn("confirm-restored");
+        let patient_id = create_test_patient(&conn, "Paciente Restaurado Confirm");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+        patients_service::restore_patient(&conn, &patient_id).unwrap();
+        let confirmed = confirm_draft(&conn, &plan.id).unwrap();
+        assert_eq!(confirmed.status, "vigente");
     }
 
     // ---- contactos ----
@@ -607,6 +761,34 @@ mod tests {
         confirm_draft(&conn, &plan.id).unwrap();
         let err = add_contact(&conn, &plan.id, support_contact()).unwrap_err();
         assert!(matches!(err, SafetyPlanError::NotEditable));
+    }
+
+    /// Micro-hardening post-Fase 12: "modificar borrador" incluye sus
+    /// contactos — un paciente archivado no puede agregar contactos nuevos
+    /// a un borrador ya existente, mismo criterio que el contenido
+    /// narrativo.
+    #[test]
+    fn rejects_adding_a_contact_after_the_patient_is_archived() {
+        let conn = test_conn("contacts-archived-add");
+        let patient_id = create_test_patient(&conn, "Paciente Contactos Archivado");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+        let err = add_contact(&conn, &plan.id, support_contact()).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::PatientArchived));
+    }
+
+    #[test]
+    fn rejects_editing_and_deleting_a_contact_after_the_patient_is_archived() {
+        let conn = test_conn("contacts-archived-edit-delete");
+        let patient_id = create_test_patient(&conn, "Paciente Contactos Archivado Dos");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let contact = add_contact(&conn, &plan.id, support_contact()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+
+        let err = update_contact(&conn, &contact.id, support_contact()).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::PatientArchived));
+        let err = delete_contact(&conn, &contact.id).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::PatientArchived));
     }
 
     #[test]
@@ -702,5 +884,142 @@ mod tests {
         let conn = test_conn("get-by-id-not-found");
         let err = get_plan_by_id(&conn, "no-existe").unwrap_err();
         assert!(matches!(err, SafetyPlanError::PlanNotFound));
+    }
+
+    // ---- "Actualizar plan": create_draft_from_current (micro-hardening post-Fase 12) ----
+
+    #[test]
+    fn create_draft_from_current_copies_narrative_content_and_reviewed_at() {
+        let conn = test_conn("from-current-copies-narrative");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Uno");
+        let plan1 = create_draft(&conn, &patient_id, full_input()).unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+
+        let plan2 = create_draft_from_current(&conn, &patient_id).unwrap();
+        assert_eq!(plan2.status, "borrador");
+        assert_eq!(plan2.version, 2);
+        assert_eq!(plan2.warning_signs, plan1.warning_signs);
+        assert_eq!(plan2.internal_strategies, plan1.internal_strategies);
+        assert_eq!(plan2.social_support_strategies, plan1.social_support_strategies);
+        assert_eq!(plan2.means_safety, plan1.means_safety);
+        assert_eq!(plan2.crisis_steps, plan1.crisis_steps);
+        assert_eq!(plan2.notes, plan1.notes);
+        assert_eq!(plan2.reviewed_at, plan1.reviewed_at);
+    }
+
+    #[test]
+    fn create_draft_from_current_copies_all_contacts_with_new_ids_and_order() {
+        let conn = test_conn("from-current-copies-contacts");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Dos");
+        let plan1 = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let c1 = add_contact(&conn, &plan1.id, support_contact()).unwrap();
+        let c2 = add_contact(
+            &conn,
+            &plan1.id,
+            SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Psiquiatra tratante".to_string(), relationship_or_role: Some("Psiquiatra".to_string()), phone: Some("+56900000002".to_string()), notes: Some("Nota".to_string()) },
+        )
+        .unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+
+        let plan2 = create_draft_from_current(&conn, &patient_id).unwrap();
+        let copied = list_contacts(&conn, &plan2.id).unwrap();
+        assert_eq!(copied.len(), 2, "los dos contactos de la vigente deben copiarse");
+
+        assert_eq!(copied[0].name, "Amiga cercana");
+        assert_eq!(copied[0].contact_type, "support_person");
+        assert_ne!(copied[0].id, c1.id, "el contacto copiado nunca comparte fila con el original");
+
+        assert_eq!(copied[1].name, "Psiquiatra tratante");
+        assert_eq!(copied[1].contact_type, "professional");
+        assert_eq!(copied[1].relationship_or_role.as_deref(), Some("Psiquiatra"));
+        assert_eq!(copied[1].phone.as_deref(), Some("+56900000002"));
+        assert_eq!(copied[1].notes.as_deref(), Some("Nota"));
+        assert_ne!(copied[1].id, c2.id);
+    }
+
+    #[test]
+    fn create_draft_from_current_with_no_contacts_yields_an_empty_list() {
+        let conn = test_conn("from-current-no-contacts");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Tres");
+        let plan1 = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+
+        let plan2 = create_draft_from_current(&conn, &patient_id).unwrap();
+        assert!(list_contacts(&conn, &plan2.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn editing_contacts_on_the_new_draft_never_touches_the_current_plans_contacts() {
+        let conn = test_conn("from-current-isolation");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Cuatro");
+        let plan1 = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let original_contact = add_contact(&conn, &plan1.id, support_contact()).unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+
+        let plan2 = create_draft_from_current(&conn, &patient_id).unwrap();
+        let copied_contacts = list_contacts(&conn, &plan2.id).unwrap();
+        let copied_contact = &copied_contacts[0];
+
+        // Editar el contacto copiado en v2 nunca debe alterar el original de v1.
+        update_contact(&conn, &copied_contact.id, SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Nombre cambiado en v2".to_string(), relationship_or_role: None, phone: None, notes: None }).unwrap();
+        let original_after_edit = list_contacts(&conn, &plan1.id).unwrap();
+        assert_eq!(original_after_edit[0].id, original_contact.id);
+        assert_eq!(original_after_edit[0].name, "Amiga cercana", "editar v2 no debe alterar el contacto de v1");
+
+        // Eliminar el contacto copiado en v2 nunca debe eliminar el de v1.
+        delete_contact(&conn, &copied_contact.id).unwrap();
+        assert_eq!(list_contacts(&conn, &plan1.id).unwrap().len(), 1, "borrar en v2 no debe borrar el contacto de v1");
+    }
+
+    #[test]
+    fn confirming_the_new_draft_never_alters_the_superseded_plans_contacts() {
+        let conn = test_conn("from-current-confirm-isolation");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Cinco");
+        let plan1 = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        add_contact(&conn, &plan1.id, support_contact()).unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+
+        let plan2 = create_draft_from_current(&conn, &patient_id).unwrap();
+        confirm_draft(&conn, &plan2.id).unwrap();
+
+        // El plan1, ahora reemplazado, conserva su propio contacto intacto.
+        let plan1_contacts = list_contacts(&conn, &plan1.id).unwrap();
+        assert_eq!(plan1_contacts.len(), 1);
+        assert_eq!(plan1_contacts[0].name, "Amiga cercana");
+
+        let plan2_contacts = list_contacts(&conn, &plan2.id).unwrap();
+        assert_eq!(plan2_contacts.len(), 1);
+    }
+
+    #[test]
+    fn rejects_create_draft_from_current_when_there_is_no_current_plan() {
+        let conn = test_conn("from-current-no-current-plan");
+        let patient_id = create_test_patient(&conn, "Paciente Sin Vigente");
+        let err = create_draft_from_current(&conn, &patient_id).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::NoCurrentPlan));
+    }
+
+    #[test]
+    fn rejects_create_draft_from_current_for_an_archived_patient() {
+        let conn = test_conn("from-current-archived");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Archivado");
+        let plan1 = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+
+        let err = create_draft_from_current(&conn, &patient_id).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::PatientArchived));
+    }
+
+    #[test]
+    fn rejects_create_draft_from_current_when_a_draft_already_exists() {
+        let conn = test_conn("from-current-already-has-draft");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Con Borrador");
+        let plan1 = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+        create_draft(&conn, &patient_id, empty_input()).unwrap();
+
+        let err = create_draft_from_current(&conn, &patient_id).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::AlreadyHasDraft));
     }
 }

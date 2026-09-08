@@ -16,6 +16,14 @@ export const safetyPlanApi = {
 
   createDraft: (patientId: string, input: SafetyPlanInput) => invoke<SafetyPlan>('create_safety_plan_draft', { patientId, input }),
 
+  /**
+   * "Actualizar plan": crea un borrador nuevo con una copia completa e
+   * independiente del vigente actual (texto, fecha de revisión y
+   * contactos, estos últimos con IDs nuevos) — hecho atómicamente en el
+   * backend para que la red de contactos nunca quede vacía en silencio.
+   */
+  createDraftFromCurrent: (patientId: string) => invoke<SafetyPlan>('create_safety_plan_draft_from_current', { patientId }),
+
   updateDraft: (planId: string, input: SafetyPlanInput) => invoke<SafetyPlan>('update_safety_plan_draft', { planId, input }),
 
   discardDraft: (planId: string) => invoke<void>('discard_safety_plan_draft', { planId }),

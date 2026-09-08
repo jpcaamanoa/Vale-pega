@@ -132,8 +132,13 @@ Vocabulario de tres estados (más simple que el `is_current`/`is_locked` de dos 
   versión activa.
 
 "Actualizar el plan" nunca es un `UPDATE` sobre el vigente: crea un **borrador nuevo**, precargado
-con el contenido del vigente (copia explícita, hecha por el frontend al llamar
-`create_safety_plan_draft` con esos valores) para facilitar la edición. Al confirmarlo
+con una copia completa e independiente del vigente — contenido narrativo, `reviewed_at` y **todos
+sus contactos** (cada uno con un `id` nuevo, sin compartir fila con la versión anterior). La copia
+se hace atómicamente en el backend (`services::safety_plans::create_draft_from_current`, dentro de
+una única transacción SQL), nunca reconstruida a mano por el frontend — así la red de apoyo de la
+versión anterior nunca puede perderse en silencio al confirmar la nueva. Editar o eliminar un
+contacto del borrador nuevo nunca altera la versión vigente/reemplazada de la que se copió, y
+viceversa: son snapshots independientes desde el instante de la copia. Al confirmarlo
 (`confirm_safety_plan_draft`), dentro de una única transacción:
 
 1. el plan vigente anterior (si existe) se marca `reemplazado` (`superseded_at` = ahora);
@@ -213,22 +218,27 @@ pausado, cerrado, o durante un reingreso posterior.
 ## 12. Paciente archivado
 
 Un paciente archivado (`patients.deleted_at IS NOT NULL`) puede seguir **consultando** su plan
-vigente y su historial completo, pero:
+vigente y su historial completo (incluyendo abrir versiones históricas), pero:
 
 - no puede **crear** un plan nuevo (`create_draft` rechaza con `PatientArchived`);
-- no puede **confirmar** ni **actualizar** un borrador mientras el paciente permanezca archivado
-  (el borrador solo puede crearse para un paciente activo, así que este caso solo podría surgir si
-  el paciente se archiva con un borrador ya en curso — ver siguiente párrafo).
+- no puede **iniciar una actualización** desde el vigente (`create_draft_from_current` rechaza con
+  `PatientArchived`);
+- no puede **actualizar**, **confirmar** ni **agregar/editar/eliminar contactos** de un borrador ya
+  existente mientras el paciente permanezca archivado — esta comprobación se repite en cada llamada
+  (`services::safety_plans::require_editable_draft`), no solo en la creación del borrador, para que
+  la regla sea autoritativa en el servicio y no dependa de que el frontend oculte los botones
+  correspondientes.
 
-Restaurar al paciente (`restore_patient`) vuelve a permitir crear planes nuevos de inmediato — la
-autoridad vive en `services::safety_plans` (verificada por
-`rejects_creating_a_draft_for_an_archived_patient`), nunca solo en React.
+`discard_draft` es la única excepción deliberada: **sí puede descartarse** un borrador aunque el
+paciente esté archivado (decisión de producto confirmada explícitamente — consistente con el
+criterio ya usado en el resto del dominio de que editar/descartar contenido aún no confirmado no se
+bloquea retroactivamente; descartar nunca crea ni modifica un registro clínico confirmado).
 
-Nota de diseño: a diferencia de la creación, `update_draft`/`confirm_draft`/`discard_draft` no
-vuelven a comprobar el estado de archivado del paciente en esta fase (mismo criterio ya usado por
-`services::patient_clinical_profile::update_clinical_profile`: editar contenido ya iniciado no se
-bloquea retroactivamente). Si en la práctica clínica esto resulta indeseable, es una decisión de
-producto a revisar explícitamente, no una laguna a corregir en silencio.
+Restaurar al paciente (`restore_patient`) vuelve a permitir crear planes nuevos, actualizar y
+confirmar de inmediato — la autoridad vive siempre en `services::safety_plans` (verificada por
+`rejects_creating_a_draft_for_an_archived_patient` y por los tests de
+`rejects_..._after_the_patient_is_archived` / `allows_..._after_the_patient_is_restored`), nunca
+solo en React.
 
 ## 13. Advertencia clínica
 
@@ -291,11 +301,16 @@ migraciones (`fresh_database_is_created_from_migrations_alone_with_all_expected_
 con las dos tablas nuevas). Ver `Informe-de-cierre-Fase-12-Plan-de-Seguridad.md` para el detalle
 completo de resultados.
 
+Micro-hardening post-Fase 12 (endurecimiento del archivado y de "Actualizar plan", ver §5 y §12):
+616 → 631 tests (15 nuevos) en `services::safety_plans`, cubriendo el rechazo/restauración de
+`update_draft`/`confirm_draft`/`add_contact`/`update_contact`/`delete_contact` para pacientes
+archivados, la excepción confirmada de `discard_draft`, y `create_draft_from_current` (copia de
+contenido narrativo + `reviewed_at` + todos los contactos con IDs nuevos, aislamiento entre
+versiones, y sus rechazos: sin plan vigente, paciente archivado, borrador ya existente).
+
 ## 19. Limitaciones conocidas
 
 - No hay atajo de "usar contacto de emergencia de la ficha" (ver §9) — mejora opcional no
   implementada.
 - No hay recordatorios automáticos de revisión del plan (`reviewed_at` es puramente informativo).
 - No hay exportación/PDF/impresión.
-- `update_draft`/`confirm_draft`/`discard_draft` no reevalúan el estado de archivado del paciente
-  en cada llamada (ver nota de diseño en §12).
