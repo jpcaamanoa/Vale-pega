@@ -1,5 +1,6 @@
 mod app_info;
 mod appointments;
+mod assessments;
 mod backup;
 mod calendar;
 mod episode_closures;
@@ -17,6 +18,7 @@ mod vault;
 
 pub use app_info::*;
 pub use appointments::*;
+pub use assessments::*;
 pub use backup::*;
 pub use calendar::*;
 pub use episode_closures::*;

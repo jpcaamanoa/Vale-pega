@@ -188,6 +188,18 @@ pub fn run() {
       commands::add_safety_plan_contact,
       commands::update_safety_plan_contact,
       commands::delete_safety_plan_contact,
+      commands::create_assessment_instrument,
+      commands::get_assessment_instrument,
+      commands::list_assessment_instruments,
+      commands::update_assessment_instrument,
+      commands::create_assessment_administration,
+      commands::get_assessment_administration,
+      commands::list_assessment_administrations,
+      commands::list_archived_assessment_administrations,
+      commands::list_assessment_administrations_for_instrument,
+      commands::update_assessment_administration,
+      commands::archive_assessment_administration,
+      commands::restore_assessment_administration,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

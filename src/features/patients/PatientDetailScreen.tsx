@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
+import { AssessmentsTab } from '../assessments/AssessmentsTab'
 import { ClinicalProfileTab } from '../clinical-profile/ClinicalProfileTab'
 import { GoalsTab } from '../goals/GoalsTab'
 import { PaymentsTab } from '../payments/PaymentsTab'
@@ -38,12 +39,13 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 ]
 
 // Estas secciones se implementan en fases posteriores (formulación clínica,
-// evaluaciones, etc.) — la navegación ya está preparada para recibirlas sin
-// rehacer la ficha del paciente. "Sesiones" es real desde la Fase 4;
-// "Objetivos" es real desde la Fase 5; "Antecedentes" es real desde la Fase 6;
-// "Pagos" es real desde la Fase 7; "Procesos" es real desde la Fase 9;
-// "Plan de seguridad" es real desde la Fase 12.
-const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'procesos', 'antecedentes', 'sesiones', 'objetivos', 'pagos', 'plan_seguridad']
+// etc.) — la navegación ya está preparada para recibirlas sin rehacer la
+// ficha del paciente. "Sesiones" es real desde la Fase 4; "Objetivos" es
+// real desde la Fase 5; "Antecedentes" es real desde la Fase 6; "Pagos" es
+// real desde la Fase 7; "Procesos" es real desde la Fase 9; "Plan de
+// seguridad" es real desde la Fase 12; "Evaluaciones" es real desde la
+// Fase 13.
+const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'procesos', 'antecedentes', 'sesiones', 'objetivos', 'evaluaciones', 'pagos', 'plan_seguridad']
 
 function SummaryRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
@@ -188,6 +190,7 @@ export function PatientDetailScreen() {
           {section === 'antecedentes' && id && <ClinicalProfileTab patientId={id} patientArchived={isArchived} />}
           {section === 'sesiones' && id && <SessionsTab patientId={id} patientArchived={isArchived} />}
           {section === 'objetivos' && id && <GoalsTab patientId={id} patientArchived={isArchived} />}
+          {section === 'evaluaciones' && id && <AssessmentsTab patientId={id} patientArchived={isArchived} />}
           {section === 'pagos' && id && <PaymentsTab patientId={id} patientArchived={isArchived} />}
           {section === 'plan_seguridad' && id && <SafetyPlanTab patientId={id} patientArchived={isArchived} />}
         </>

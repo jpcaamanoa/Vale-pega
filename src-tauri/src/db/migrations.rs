@@ -892,6 +892,42 @@ BEGIN
 END;
 "#;
 
+/// V7 (Fase 13): dos huecos de `assessment_instruments`/
+/// `assessment_administrations` (presentes sin cambios desde `SCHEMA_V1`,
+/// nunca revisados) frente a lo que pide el primer vertical productivo de
+/// evaluaciones — ver `Plan-Fase-13-pendiente-de-aprobacion.md` para el
+/// análisis completo que motivó esta migración, aprobado explícitamente
+/// antes de escribirse.
+///
+/// `abbreviation`/`category` en `assessment_instruments`: texto libre,
+/// nulables, sin `CHECK` — a propósito, ninguna lista cerrada de categorías
+/// (la usuaria mantiene su propio catálogo; una taxonomía fija habría que
+/// mantenerla a mano cada vez que registre un instrumento nuevo).
+///
+/// `episode_id` en `assessment_administrations`: mismo patrón exacto que
+/// `sessions.episode_id`/`therapeutic_goals.episode_id` (`SCHEMA_V4`) —
+/// nulable, `ON DELETE SET NULL`, vínculo opcional a un proceso terapéutico
+/// concreto. Esta tabla es anterior a `treatment_episodes` (nació en
+/// `SCHEMA_V1`, `treatment_episodes` en `SCHEMA_V4`) y quedó sin este vínculo
+/// simplemente porque nadie la tocó, a diferencia de `payments`/
+/// `patient_prep_notes`/`therapy_tasks`, que quedaron sin `episode_id` por
+/// decisión deliberada (ver comentario en `SCHEMA_V4`). `context` (`ingreso`/
+/// `seguimiento`/`alta`) no sustituye este vínculo: es un enum sobre cuándo
+/// se administró en términos generales, no una referencia al proceso
+/// concreto.
+///
+/// Puramente aditiva — `SCHEMA_V1`–`V6` quedan intactos, ninguna columna
+/// existente cambia de tipo ni de restricción, ninguna fila existente pierde
+/// nada (recibe `NULL` en las columnas nuevas).
+const SCHEMA_V7: &str = r#"
+ALTER TABLE assessment_instruments ADD COLUMN abbreviation TEXT;
+ALTER TABLE assessment_instruments ADD COLUMN category TEXT;
+
+ALTER TABLE assessment_administrations ADD COLUMN episode_id TEXT
+  REFERENCES treatment_episodes(id) ON DELETE SET NULL;
+CREATE INDEX idx_assessment_administrations_episode ON assessment_administrations(episode_id);
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -903,6 +939,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V4).foreign_key_check(),
         M::up(SCHEMA_V5).foreign_key_check(),
         M::up(SCHEMA_V6).foreign_key_check(),
+        M::up(SCHEMA_V7).foreign_key_check(),
     ])
 }
 
@@ -1594,6 +1631,77 @@ mod tests {
             )
             .expect_err("reverted_at sin reverted_reason debe rechazarse a nivel de base de datos");
         assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    // ---------------------------------------------------------------
+    // 2e (Fase 13): migración V7 — abbreviation/category en
+    // assessment_instruments + episode_id en assessment_administrations —
+    // es aditiva y no destructiva sobre un vault con datos ya insertados.
+    // ---------------------------------------------------------------
+    #[test]
+    fn fresh_database_has_v7_columns() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v7");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(assessment_instruments)").unwrap();
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(cols.contains(&"abbreviation".to_string()), "assessment_instruments debe tener abbreviation desde el arranque");
+        assert!(cols.contains(&"category".to_string()), "assessment_instruments debe tener category desde el arranque");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(assessment_administrations)").unwrap();
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(cols.contains(&"episode_id".to_string()), "assessment_administrations debe tener episode_id desde el arranque");
+    }
+
+    #[test]
+    fn v7_migration_is_idempotent_and_preserves_v1_assessment_data() {
+        let path = temp_db_path("v7-idempotent");
+        let k = key(0xE7);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO assessment_instruments (id, name) VALUES ('i1', 'BDI-II')", []).unwrap();
+        conn.execute(
+            "INSERT INTO assessment_administrations (id, patient_id, instrument_id, administered_at, total_score) VALUES ('a1', 'p1', 'i1', '2026-01-10', 18.0)",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1..V7 ya vigentes no debería fallar");
+
+        let (abbreviation, category): (Option<String>, Option<String>) =
+            conn.query_row("SELECT abbreviation, category FROM assessment_instruments WHERE id = 'i1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!(abbreviation.is_none(), "una fila anterior a V7 recibe NULL, nunca un valor inventado");
+        assert!(category.is_none());
+
+        let episode_id: Option<String> = conn.query_row("SELECT episode_id FROM assessment_administrations WHERE id = 'a1'", [], |r| r.get(0)).unwrap();
+        assert!(episode_id.is_none());
+
+        let total_score: f64 = conn.query_row("SELECT total_score FROM assessment_administrations WHERE id = 'a1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(total_score, 18.0, "el dato de V1 no se pierde ni se altera al migrar a V7");
+    }
+
+    #[test]
+    fn assessment_administration_can_link_to_a_treatment_episode_of_the_same_patient() {
+        let (conn, _path, _key) = migrated_vault("v7-episode-link");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        conn.execute("INSERT INTO assessment_instruments (id, name, abbreviation, category) VALUES ('i1', 'BDI-II', 'BDI-II', 'Depresión')", []).unwrap();
+        conn.execute(
+            "INSERT INTO assessment_administrations (id, patient_id, instrument_id, episode_id, administered_at) VALUES ('a1', 'p1', 'i1', 'ep1', '2026-01-10')",
+            [],
+        )
+        .unwrap();
+
+        let (abbreviation, category, episode_id): (String, String, String) = conn
+            .query_row(
+                "SELECT i.abbreviation, i.category, a.episode_id FROM assessment_administrations a JOIN assessment_instruments i ON i.id = a.instrument_id WHERE a.id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(abbreviation, "BDI-II");
+        assert_eq!(category, "Depresión");
+        assert_eq!(episode_id, "ep1");
     }
 
     // ---------------------------------------------------------------
