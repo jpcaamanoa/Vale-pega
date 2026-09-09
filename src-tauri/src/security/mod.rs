@@ -24,6 +24,12 @@ mod vault_meta;
 pub use password_policy::{evaluate as evaluate_password_strength, PasswordStrength};
 pub use session::{VaultSession, VaultStatus};
 
+// Fase 16 (Documentos cifrados): capacidad mínima de envolver/desenvolver
+// una DEK de archivo con la DEK del vault, sin exponer nunca la DEK del
+// vault en sí — ver el bloque de comentarios en `session.rs` justo antes de
+// `FileKey`. Consumido exclusivamente por `services::document_crypto`.
+pub use session::{FileKey, UnwrapFileKeyError, WrapFileKeyError, WrappedFileKey, FILE_KEY_WRAP_NONCE_LEN};
+
 // Re-exportado únicamente para `backup::service` (Fase 10): validar la
 // contraseña/código de recuperación de un vault en *staging* (una copia
 // restaurada temporal, nunca el vault activo de `VaultSession`) exige

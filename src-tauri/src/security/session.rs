@@ -10,10 +10,14 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use rusqlite::Connection;
+use zeroize::Zeroize;
 
 use crate::db::VaultKey;
 
+use super::random;
 use super::vault_manager::{
     self, ChangePasswordError, CreateVaultError, FinalizeCreationError, PendingVaultCreation,
     RecoveryError, UnlockError, VaultPaths,
@@ -110,6 +114,113 @@ impl fmt::Display for VaultLockedError {
     }
 }
 impl std::error::Error for VaultLockedError {}
+
+// ---------------------------------------------------------------------
+// Fase 16 (Documentos cifrados) — capacidad criptográfica mínima expuesta
+// a `services::document_crypto`, aprobada explícitamente en
+// `Plan-Fase-16-Documentos-cifrados-pendiente-de-aprobacion.md` (Bloque 3).
+//
+// Principio de diseño: `services::document_crypto` nunca ve la DEK del
+// vault — solo puede pedir "envuelve esta clave de archivo" o "desenvuelve
+// este envoltorio", y solo mientras la sesión esté desbloqueada. La DEK del
+// vault (`UnlockedSession::dek`) nunca cruza el límite de este módulo.
+//
+// El envoltorio reutiliza exactamente el mismo mecanismo ya auditado de
+// `security::envelope` (AES-256-GCM, nonce aleatorio de 12 bytes nunca
+// reutilizado) — deliberadamente reimplementado aquí, en vez de generalizar
+// `envelope.rs`, porque la aprobación de Fase 16 acotó la modificación
+// exclusivamente a este archivo (`security/session.rs`), no a todo
+// `security/*`.
+// ---------------------------------------------------------------------
+
+pub const FILE_KEY_LEN: usize = 32;
+pub const FILE_KEY_WRAP_NONCE_LEN: usize = 12;
+
+/// Una DEK de archivo (Fase 16) ya desenvuelta — nunca la DEK del vault.
+/// Mismo criterio de higiene que `db::VaultKey`/`security::kdf::Kek`:
+/// `Debug` redactado, sin `Clone` (cada desenvoltura produce una instancia
+/// nueva, de vida lo más corta posible), zeroizada al soltarse.
+pub struct FileKey([u8; FILE_KEY_LEN]);
+
+impl FileKey {
+    /// Solo para consumo dentro de este mismo crate — `services::
+    /// document_crypto` la usa para cifrar/descifrar el contenido de un
+    /// archivo, nunca se expone fuera del binario.
+    pub(crate) fn expose_secret(&self) -> &[u8; FILE_KEY_LEN] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for FileKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileKey").field("bytes", &"<redacted>").finish()
+    }
+}
+
+impl Drop for FileKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// DEK de archivo envuelta con la DEK del vault — lo único que se persiste
+/// en la fila de `documents` (columnas `wrapped_file_dek`/`wrap_nonce`,
+/// `SCHEMA_V9`). Ninguno de los dos campos es secreto por sí solo sin la
+/// DEK del vault, que a su vez exige la sesión desbloqueada — mismo
+/// principio que `security::envelope::WrappedKey`.
+#[derive(Debug, Clone)]
+pub struct WrappedFileKey {
+    pub nonce: [u8; FILE_KEY_WRAP_NONCE_LEN],
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub enum WrapFileKeyError {
+    /// El vault está bloqueado — no hay ninguna DEK con la cual envolver.
+    Locked,
+    Random(getrandom::Error),
+    /// No debería ocurrir con una clave de tamaño fijo válido.
+    EncryptionFailed,
+}
+impl fmt::Display for WrapFileKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WrapFileKeyError::Locked => write!(f, "el vault está bloqueado"),
+            WrapFileKeyError::Random(_) => write!(f, "no se pudo generar un nonce aleatorio"),
+            WrapFileKeyError::EncryptionFailed => write!(f, "no se pudo envolver la clave del archivo"),
+        }
+    }
+}
+impl std::error::Error for WrapFileKeyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WrapFileKeyError::Random(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum UnwrapFileKeyError {
+    /// El vault está bloqueado — no hay ninguna DEK con la cual desenvolver.
+    Locked,
+    /// DEK del vault incorrecta (no debería ocurrir con la sesión ya
+    /// desbloqueada) o el envoltorio está dañado/manipulado — indistinguibles
+    /// por diseño, mismo criterio que `EnvelopeError::UnwrapFailed`.
+    UnwrapFailed,
+    /// El contenido desenvuelto no mide exactamente `FILE_KEY_LEN` bytes.
+    InvalidLength,
+}
+impl fmt::Display for UnwrapFileKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UnwrapFileKeyError::Locked => write!(f, "el vault está bloqueado"),
+            UnwrapFileKeyError::UnwrapFailed => write!(f, "no se pudo desenvolver la clave del archivo"),
+            UnwrapFileKeyError::InvalidLength => write!(f, "la clave de archivo desenvuelta tiene un tamaño inválido"),
+        }
+    }
+}
+impl std::error::Error for UnwrapFileKeyError {}
 
 /// Maneja el ciclo de vida completo de autenticación de un vault. Pensado
 /// para vivir como estado compartido de Tauri (`tauri::Manager::manage`).
@@ -293,6 +404,47 @@ impl VaultSession {
             State::Unlocked(session) => Ok(f(&session.conn)),
             _ => Err(VaultLockedError),
         }
+    }
+
+    /// Envuelve una DEK de archivo (Fase 16) con la DEK del vault de esta
+    /// sesión — la DEK del vault nunca sale de este método. Nonce aleatorio
+    /// nuevo en cada llamada, nunca reutilizado, mismo criterio que
+    /// `security::envelope::wrap_dek`.
+    pub fn wrap_file_key(&self, file_key: &[u8; FILE_KEY_LEN]) -> Result<WrappedFileKey, WrapFileKeyError> {
+        let state = self.state.lock().unwrap();
+        let dek = match &*state {
+            State::Unlocked(session) => session.dek.expose_secret(),
+            _ => return Err(WrapFileKeyError::Locked),
+        };
+        let nonce_bytes = random::bytes::<FILE_KEY_WRAP_NONCE_LEN>().map_err(WrapFileKeyError::Random)?;
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*dek));
+        let nonce = Nonce::from(nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(&nonce, file_key.as_slice())
+            .map_err(|_| WrapFileKeyError::EncryptionFailed)?;
+        Ok(WrappedFileKey { nonce: nonce_bytes, ciphertext })
+    }
+
+    /// Desenvuelve una DEK de archivo (Fase 16) con la DEK del vault de esta
+    /// sesión. Devuelve la `FileKey` ya lista para usar — nunca la DEK del
+    /// vault en sí.
+    pub fn unwrap_file_key(&self, wrapped: &WrappedFileKey) -> Result<FileKey, UnwrapFileKeyError> {
+        let state = self.state.lock().unwrap();
+        let dek = match &*state {
+            State::Unlocked(session) => session.dek.expose_secret(),
+            _ => return Err(UnwrapFileKeyError::Locked),
+        };
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*dek));
+        let nonce = Nonce::from(wrapped.nonce);
+        let mut plaintext = cipher
+            .decrypt(&nonce, wrapped.ciphertext.as_slice())
+            .map_err(|_| UnwrapFileKeyError::UnwrapFailed)?;
+        let result = <[u8; FILE_KEY_LEN]>::try_from(plaintext.as_slice()).map_err(|_| UnwrapFileKeyError::InvalidLength);
+        // El texto plano intermedio contiene la clave del archivo: no
+        // dejarlo en memoria más de lo necesario, mismo criterio que
+        // `security::envelope::unwrap_dek`.
+        plaintext.zeroize();
+        result.map(FileKey)
     }
 }
 

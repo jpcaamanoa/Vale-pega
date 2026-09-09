@@ -43,17 +43,33 @@ pub fn run() {
       // normal.
       backup::service::run_startup_recovery(&vault_dir);
 
+      // Fase 16 (Documentos cifrados): barrido de temporales descifrados que
+      // un crash de una sesión anterior pudiera haber dejado sin limpiar —
+      // ver `services::document_temp::sweep_stale_temp_files`. No hace nada
+      // en el caso normal.
+      services::document_temp::sweep_stale_temp_files();
+
       let vault_session: Arc<VaultSession> = Arc::new(VaultSession::new(&vault_dir));
       app.manage(vault_session.clone());
+
+      let document_temp_registry: Arc<services::document_temp::DocumentTempRegistry> = Arc::new(services::document_temp::DocumentTempRegistry::new());
+      app.manage(document_temp_registry.clone());
 
       // Bloqueo automático por inactividad (Fase 1.4). Deliberadamente NO
       // reacciona a que el sistema operativo se suspenda o bloquee la
       // pantalla — eso queda fuera de alcance de esta fase, ver
       // `security::session::VaultSession::tick_auto_lock`.
+      //
+      // Fase 16: al bloquear por inactividad, también se limpian los
+      // temporales descifrados de Documentos que pudieran existir (Bloque 21
+      // de la aprobación) — el bloqueo manual hace lo mismo, ver
+      // `commands::vault::lock_vault`.
       tauri::async_runtime::spawn(async move {
         loop {
           tokio::time::sleep(AUTO_LOCK_TICK_INTERVAL).await;
-          vault_session.tick_auto_lock();
+          if vault_session.tick_auto_lock() {
+            document_temp_registry.cleanup_all();
+          }
         }
       });
 
@@ -208,7 +224,29 @@ pub fn run() {
       commands::get_formulation_version,
       commands::list_formulation_versions,
       commands::create_formulation_version,
+      commands::create_document,
+      commands::get_document,
+      commands::list_documents,
+      commands::list_archived_documents,
+      commands::update_document_metadata,
+      commands::archive_document,
+      commands::restore_document,
+      commands::get_document_data_url,
+      commands::open_document_externally,
+      commands::export_document,
+      commands::check_document_consistency,
     ])
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application")
+    .run(|app_handle, event| {
+      // Fase 16: al cerrar la aplicación, limpiar cualquier temporal
+      // descifrado de Documentos que pudiera seguir existiendo (Bloque 21 de
+      // la aprobación, "cuando sea posible") — best-effort, nunca bloquea el
+      // cierre.
+      if let tauri::RunEvent::Exit = event {
+        if let Some(registry) = app_handle.try_state::<Arc<services::document_temp::DocumentTempRegistry>>() {
+          registry.cleanup_all();
+        }
+      }
+    });
 }

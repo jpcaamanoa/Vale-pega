@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
 import { AssessmentsTab } from '../assessments/AssessmentsTab'
 import { ClinicalProfileTab } from '../clinical-profile/ClinicalProfileTab'
+import { DocumentsTab } from '../documents/DocumentsTab'
 import { FormulationTab } from '../formulation/FormulationTab'
 import { GoalsTab } from '../goals/GoalsTab'
 import { PaymentsTab } from '../payments/PaymentsTab'
@@ -39,14 +40,26 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'linea_temporal', label: 'Línea temporal' },
 ]
 
-// Estas secciones se implementan en fases posteriores (documentos, línea
-// temporal, etc.) — la navegación ya está preparada para recibirlas sin
-// rehacer la ficha del paciente. "Sesiones" es real desde la Fase 4;
-// "Objetivos" es real desde la Fase 5; "Antecedentes" es real desde la
-// Fase 6; "Pagos" es real desde la Fase 7; "Procesos" es real desde la
-// Fase 9; "Plan de seguridad" es real desde la Fase 12; "Evaluaciones" es
-// real desde la Fase 13; "Formulación" es real desde la Fase 15.
-const SECTIONS_WITH_REAL_CONTENT: SectionId[] = ['resumen', 'procesos', 'antecedentes', 'sesiones', 'formulacion', 'objetivos', 'evaluaciones', 'pagos', 'plan_seguridad']
+// Estas secciones se implementan en fases posteriores (línea temporal,
+// etc.) — la navegación ya está preparada para recibirlas sin rehacer la
+// ficha del paciente. "Sesiones" es real desde la Fase 4; "Objetivos" es
+// real desde la Fase 5; "Antecedentes" es real desde la Fase 6; "Pagos" es
+// real desde la Fase 7; "Procesos" es real desde la Fase 9; "Plan de
+// seguridad" es real desde la Fase 12; "Evaluaciones" es real desde la
+// Fase 13; "Formulación" es real desde la Fase 15; "Documentos" es real
+// desde la Fase 16.
+const SECTIONS_WITH_REAL_CONTENT: SectionId[] = [
+  'resumen',
+  'procesos',
+  'antecedentes',
+  'sesiones',
+  'formulacion',
+  'objetivos',
+  'evaluaciones',
+  'documentos',
+  'pagos',
+  'plan_seguridad',
+]
 
 function SummaryRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
@@ -193,6 +206,7 @@ export function PatientDetailScreen() {
           {section === 'formulacion' && id && <FormulationTab patientId={id} patientArchived={isArchived} />}
           {section === 'objetivos' && id && <GoalsTab patientId={id} patientArchived={isArchived} />}
           {section === 'evaluaciones' && id && <AssessmentsTab patientId={id} patientArchived={isArchived} />}
+          {section === 'documentos' && id && <DocumentsTab patientId={id} patientArchived={isArchived} />}
           {section === 'pagos' && id && <PaymentsTab patientId={id} patientArchived={isArchived} />}
           {section === 'plan_seguridad' && id && <SafetyPlanTab patientId={id} patientArchived={isArchived} />}
         </>

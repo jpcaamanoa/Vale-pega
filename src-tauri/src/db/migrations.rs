@@ -971,6 +971,105 @@ CREATE UNIQUE INDEX idx_case_formulations_one_per_episode
   ON case_formulations(episode_id) WHERE episode_id IS NOT NULL AND deleted_at IS NULL;
 "#;
 
+/// Fase 16 (Documentos y adjuntos clínicos cifrados) — aprobada explícitamente en
+/// `Plan-Fase-16-Documentos-cifrados-pendiente-de-aprobacion.md` tras auditoría previa. `documents`
+/// existe sin usar desde `SCHEMA_V1` (Fase 1.3): ningún repositorio/servicio/comando/componente la
+/// tocó nunca, así que — igual que `case_formulations` antes de la Fase 15 — no existe ninguna fila
+/// real en ningún ambiente, y este es el momento más seguro posible para migrar.
+///
+/// **Reconstrucción completa de la tabla, no un simple `ALTER TABLE ADD COLUMN`.** El `CHECK` de
+/// `category` en `SCHEMA_V1` es una lista cerrada de 6 valores que no incluye `'derivacion'`
+/// (Bloque 13 de la aprobación: se agrega esa séptima categoría). SQLite no admite modificar un
+/// `CHECK` existente ni agregar uno nuevo vía `ALTER TABLE` — la única forma soportada es
+/// reconstruir la tabla (`CREATE TABLE` nueva con el `CHECK` correcto, copiar filas, `DROP` de la
+/// original, `RENAME`). Esto **no** es "editar una migración ya publicada" (`SCHEMA_V1` permanece
+/// intacta en el código, carácter por carácter): es una migración nueva que reemplaza el objeto de
+/// esquema en tiempo de ejecución, exactamente el mecanismo que SQLite documenta para este caso.
+/// Seguro de hacer aquí porque, igual que con `case_formulations` antes de la Fase 15, no existe
+/// ninguna fila real de `documents` en ningún ambiente — el `INSERT ... SELECT` de abajo copia
+/// igualmente cualquier fila que pudiera existir, sin perder nada si la hubiera.
+///
+/// Columnas nuevas sobre la definición de `SCHEMA_V1`:
+///
+/// - `episode_id` (nulable, `ON DELETE SET NULL`): vínculo **opcional** a un proceso terapéutico,
+///   mismo patrón exacto que `sessions.episode_id`/`therapeutic_goals.episode_id` (`SCHEMA_V4`) y
+///   `assessment_administrations.episode_id` (`SCHEMA_V7`). A diferencia de `case_formulations`
+///   (Fase 15, donde `episode_id` es obligatorio a nivel de servicio), aquí se mantiene opcional
+///   también a nivel de servicio: un documento puede ser longitudinal del paciente sin pertenecer a
+///   ningún proceso ni sesión concretos — decisión explícita de la aprobación de Fase 16 (Bloque 8),
+///   distinta de la de Formulación a propósito.
+/// - `wrapped_file_dek` / `wrap_nonce` (ambas nulables en el esquema, pero el repositorio nunca
+///   inserta un documento sin ambas — ver `repositories::documents`): la DEK aleatoria de 256 bits
+///   de ESE archivo, envuelta con AES-256-GCM por una clave derivada del DEK del vault (ver
+///   `services::document_crypto` y `security::VaultSession::wrap_file_key`), guardada en base64
+///   igual que `vault.meta.json` guarda el DEK del vault envuelto. Nunca se guarda la DEK del
+///   archivo en claro. No son `NOT NULL` porque no existe ningún valor por defecto razonable para
+///   material criptográfico — la ausencia de valor nunca ocurre en la práctica porque
+///   `repositories::documents::insert_document` exige ambos campos como parámetros obligatorios
+///   (no `Option`), igual criterio que `episode_id: &str` (obligatorio, no opcional) en
+///   `NewFormulationRow` de la Fase 15 pese a que la columna SQL correspondiente también es
+///   nulable.
+/// - `format_version` (`INTEGER NOT NULL DEFAULT 1`): sí puede ser `NOT NULL` porque tiene un valor
+///   constante razonable — el formato de cifrado versionado exigido por la aprobación (Bloque 5).
+///   Vive también, de forma redundante y deliberada, en el header del propio archivo `.enc` (ver
+///   `services::document_crypto::FILE_FORMAT_VERSION`) — mismo principio de "defensa en
+///   profundidad" ya aplicado por `vault.meta.json::FORMAT_VERSION`.
+///
+/// **`sha256_plaintext` no se reinterpreta.** Se evaluó explícitamente (Bloque 9 de la aprobación)
+/// convertirla en un hash del ciphertext, y se descartó: el nombre de una columna debe conservar su
+/// significado. La columna sigue siendo, literalmente, lo que su nombre dice — un hash SHA-256 del
+/// contenido descifrado, calculado una sola vez al leer el archivo de origen durante la importación,
+/// como verificación de que la lectura del archivo del usuario no se corrompió antes de cifrarlo.
+/// Nunca se expone por IPC, nunca se usa para comparar documentos entre sí. No se agrega ninguna
+/// columna de hash del ciphertext: el propio mecanismo de Backup (`backup::manifest::
+/// BackupFileEntry.sha256`) ya calcula y verifica un hash de cada archivo del contenedor al
+/// respaldar/restaurar — igual que ya hace hoy con `vault.db`/`vault.meta.json` — sin necesitar
+/// ninguna columna nueva en `documents` para eso. Ver `docs/documents.md` sección de hashing.
+///
+/// No se agrega ningún `CHECK` de formato sobre `storage_path` (multiplicaría el riesgo de esta
+/// reconstrucción sin necesidad real). La prevención de path traversal (Bloque 6 de la aprobación)
+/// se hace exclusivamente en Rust: `storage_path` siempre se genera internamente a partir de un
+/// UUID nuevo, nunca a partir de ningún input del usuario — ver
+/// `services::document_crypto::opaque_storage_path`/`resolve_within_files_root` y sus tests.
+const SCHEMA_V9: &str = r#"
+CREATE TABLE documents_v9 (
+  id TEXT PRIMARY KEY,
+  patient_id TEXT REFERENCES patients(id) ON DELETE SET NULL,
+  episode_id TEXT REFERENCES treatment_episodes(id) ON DELETE SET NULL,
+  session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  category TEXT CHECK (category IN
+    ('informe','consentimiento','evaluacion_adjunta','receta','correspondencia','derivacion','otro')),
+  original_filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  sha256_plaintext TEXT NOT NULL CHECK (length(sha256_plaintext) = 64),
+  storage_path TEXT NOT NULL UNIQUE,
+  is_clinical INTEGER NOT NULL DEFAULT 1 CHECK (is_clinical IN (0,1)),
+  description TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  deleted_at TEXT,
+  wrapped_file_dek TEXT,
+  wrap_nonce TEXT,
+  format_version INTEGER NOT NULL DEFAULT 1
+);
+INSERT INTO documents_v9 (id, patient_id, session_id, category, original_filename, mime_type, size_bytes,
+    sha256_plaintext, storage_path, is_clinical, description, created_at, updated_at, deleted_at)
+  SELECT id, patient_id, session_id, category, original_filename, mime_type, size_bytes,
+    sha256_plaintext, storage_path, is_clinical, description, created_at, updated_at, deleted_at
+  FROM documents;
+DROP TABLE documents;
+ALTER TABLE documents_v9 RENAME TO documents;
+CREATE INDEX idx_documents_patient ON documents(patient_id);
+CREATE INDEX idx_documents_episode ON documents(episode_id);
+CREATE TRIGGER trg_documents_touch_updated_at
+AFTER UPDATE ON documents
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE documents SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -984,6 +1083,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V6).foreign_key_check(),
         M::up(SCHEMA_V7).foreign_key_check(),
         M::up(SCHEMA_V8).foreign_key_check(),
+        M::up(SCHEMA_V9).foreign_key_check(),
     ])
 }
 
@@ -1806,6 +1906,97 @@ mod tests {
         // parcial no aplica — solo restringe episode_id IS NOT NULL.
         conn.execute("INSERT INTO case_formulations (id, patient_id, title) VALUES ('f3', 'p1', 'Formulación sin proceso')", [])
             .unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // 2g (Fase 16): migración V9 — episode_id + metadata criptográfica en
+    // documents — es aditiva y no destructiva sobre un vault con datos ya
+    // insertados.
+    // ---------------------------------------------------------------
+    #[test]
+    fn fresh_database_has_v9_columns() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v9");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(documents)").unwrap();
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        for expected in ["episode_id", "wrapped_file_dek", "wrap_nonce", "format_version"] {
+            assert!(cols.contains(&expected.to_string()), "documents debe tener {expected} desde el arranque");
+        }
+    }
+
+    #[test]
+    fn fresh_documents_row_defaults_format_version_to_one() {
+        let (conn, _path, _key) = migrated_vault("v9-format-version-default");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path)
+             VALUES ('d1', 'p1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc')",
+            params!["a".repeat(64)],
+        )
+        .unwrap();
+        let format_version: i64 = conn.query_row("SELECT format_version FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(format_version, 1);
+    }
+
+    #[test]
+    fn v9_migration_is_idempotent_and_preserves_v1_document_data() {
+        let path = temp_db_path("v9-idempotent");
+        let k = key(0xE9);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path)
+             VALUES ('d1', 'p1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc')",
+            params!["a".repeat(64)],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1..V9 ya vigentes no debería fallar");
+
+        let episode_id: Option<String> = conn.query_row("SELECT episode_id FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert!(episode_id.is_none(), "una fila anterior a V9 recibe NULL, nunca un valor inventado");
+        let wrapped: Option<String> = conn.query_row("SELECT wrapped_file_dek FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert!(wrapped.is_none());
+
+        let filename: String = conn.query_row("SELECT original_filename FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(filename, "informe.pdf", "el dato de V1 no se pierde ni se altera al migrar a V9");
+    }
+
+    #[test]
+    fn document_can_link_to_a_treatment_episode_of_the_same_patient() {
+        let (conn, _path, _key) = migrated_vault("v9-episode-link");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, patient_id, episode_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path)
+             VALUES ('d1', 'p1', 'ep1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc')",
+            params!["a".repeat(64)],
+        )
+        .unwrap();
+
+        let episode_id: String = conn.query_row("SELECT episode_id FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(episode_id, "ep1");
+    }
+
+    #[test]
+    fn multiple_documents_are_allowed_for_the_same_episode() {
+        // A diferencia de case_formulations (Fase 15, una formulación por
+        // proceso), documents no tiene ninguna regla de "uno por proceso" —
+        // un proceso puede tener cualquier cantidad de documentos.
+        let (conn, _path, _key) = migrated_vault("v9-multiple-per-episode");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO treatment_episodes (id, patient_id, started_at) VALUES ('ep1', 'p1', '2026-01-01')", []).unwrap();
+        for id in ["d1", "d2"] {
+            conn.execute(
+                "INSERT INTO documents (id, patient_id, episode_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path)
+                 VALUES (?1, 'p1', 'ep1', 'informe.pdf', 'application/pdf', 10, ?2, ?3)",
+                rusqlite::params![id, "a".repeat(64), format!("files/ab/{id}.enc")],
+            )
+            .unwrap();
+        }
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM documents WHERE episode_id = 'ep1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
     }
 
     // ---------------------------------------------------------------

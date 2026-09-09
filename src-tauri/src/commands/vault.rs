@@ -10,8 +10,10 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::security::{PasswordStrength, VaultSession, VaultStatus};
+use crate::services::document_temp::DocumentTempRegistry;
 
 type SharedVaultSession = Arc<VaultSession>;
+type SharedTempRegistry = Arc<DocumentTempRegistry>;
 
 #[tauri::command]
 pub fn vault_status(state: State<'_, SharedVaultSession>) -> VaultStatus {
@@ -65,9 +67,13 @@ pub fn change_vault_password(
         .map_err(|e| e.to_string())
 }
 
+/// Fase 16: bloquear también limpia cualquier temporal descifrado de
+/// Documentos que pudiera existir (Bloque 21 de la aprobación) — mismo
+/// criterio que el bloqueo automático por inactividad, ver `lib.rs`.
 #[tauri::command]
-pub fn lock_vault(state: State<'_, SharedVaultSession>) {
+pub fn lock_vault(state: State<'_, SharedVaultSession>, temp_registry: State<'_, SharedTempRegistry>) {
     state.lock();
+    temp_registry.cleanup_all();
 }
 
 #[tauri::command]

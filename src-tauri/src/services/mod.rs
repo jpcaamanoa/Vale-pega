@@ -4,6 +4,9 @@
 
 pub mod appointments;
 pub mod assessments;
+pub mod document_crypto;
+pub mod document_temp;
+pub mod documents;
 pub mod episode_closures;
 pub mod episode_clinical_profile;
 pub mod formulations;

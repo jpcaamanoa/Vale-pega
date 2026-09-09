@@ -114,6 +114,10 @@ pub enum BackupError {
     /// El archivo de destino elegido por la usuaria ya existe. Nunca se
     /// sobrescribe un backup existente en silencio.
     DestinationAlreadyExists,
+    /// Fase 16: una fila de `documents` referencia un `storage_path` cuyo archivo físico no
+    /// existe en `vault/files/` — nunca se crea silenciosamente un backup "completo" que en
+    /// realidad le faltaría ese documento (Bloque 24 de la aprobación).
+    MissingDocumentFile(String),
 }
 impl std::fmt::Display for BackupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -123,6 +127,7 @@ impl std::fmt::Display for BackupError {
             BackupError::Io(e) => write!(f, "error de E/S: {e}"),
             BackupError::Archive(e) => write!(f, "error al empaquetar el respaldo: {e}"),
             BackupError::DestinationAlreadyExists => write!(f, "ya existe un archivo en la ubicación elegida"),
+            BackupError::MissingDocumentFile(p) => write!(f, "un documento hace referencia a un archivo que no existe: {p}"),
         }
     }
 }
@@ -178,11 +183,17 @@ pub fn create_backup(session: &VaultSession, vault_dir: &Path, dest_path: &Path)
 
         // VACUUM INTO exige una conexión viva y desbloqueada — con el vault
         // bloqueado, `with_connection` devuelve `Err` sin llegar a intentar
-        // nada, que es exactamente la regla de esta fase (§17).
-        let schema_version: i64 = session
-            .with_connection(|conn| -> rusqlite::Result<i64> {
+        // nada, que es exactamente la regla de esta fase (§17). Fase 16: se
+        // enumeran los `storage_path` de `documents` en la misma llamada a
+        // `with_connection` que hace el `VACUUM INTO`, para que ambos
+        // reflejen exactamente el mismo instante — nunca una lista de
+        // documentos más nueva (o más vieja) que el propio snapshot de la DB.
+        let (schema_version, document_storage_paths): (i64, Vec<String>) = session
+            .with_connection(|conn| -> rusqlite::Result<(i64, Vec<String>)> {
                 conn.execute_batch(&format!("VACUUM INTO '{snapshot_db_str}';"))?;
-                conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+                let schema_version = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+                let paths = crate::repositories::documents::list_all_storage_paths(conn)?;
+                Ok((schema_version, paths))
             })
             .map_err(|_| BackupError::VaultLocked)?
             .map_err(BackupError::Database)?;
@@ -192,10 +203,31 @@ pub fn create_backup(session: &VaultSession, vault_dir: &Path, dest_path: &Path)
         std::fs::copy(&meta_src, &snapshot_meta)?;
         let vault_meta_format_version = read_vault_meta_format_version(&snapshot_meta)?;
 
-        let files = vec![
+        let mut files = vec![
             manifest_entry_for(VAULT_DB_ENTRY, &snapshot_db)?,
             manifest_entry_for(VAULT_META_ENTRY, &snapshot_meta)?,
         ];
+
+        // Fase 16: copia cada ciphertext de documento tal cual (ya está cifrado — nunca se
+        // descifra para respaldar, Bloque 23 de la aprobación) a la misma estructura relativa
+        // dentro del área de scratch, para que termine en el mismo `files/<sharding>/<uuid>.enc`
+        // dentro del contenedor. Si la fila de `documents` referencia un archivo que no existe
+        // físicamente, el backup completo se rechaza — nunca se produce silenciosamente un
+        // backup incompleto (Bloque 24 de la aprobación).
+        let mut entries: Vec<(String, PathBuf)> = vec![(VAULT_DB_ENTRY.to_string(), snapshot_db.clone()), (VAULT_META_ENTRY.to_string(), snapshot_meta.clone())];
+        for relative in &document_storage_paths {
+            let source = vault_dir.join(relative);
+            if !source.exists() {
+                return Err(BackupError::MissingDocumentFile(relative.clone()));
+            }
+            let dest = scratch.join(relative);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&source, &dest)?;
+            files.push(manifest_entry_for(relative, &dest)?);
+            entries.push((relative.clone(), dest));
+        }
 
         let manifest = BackupManifest {
             backup_format_version: BACKUP_FORMAT_VERSION,
@@ -208,8 +240,10 @@ pub fn create_backup(session: &VaultSession, vault_dir: &Path, dest_path: &Path)
         };
         let manifest_path = scratch.join(MANIFEST_ENTRY);
         std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).expect("BackupManifest siempre es serializable"))?;
+        entries.insert(0, (MANIFEST_ENTRY.to_string(), manifest_path));
 
-        archive::write_container(dest_path, &[(MANIFEST_ENTRY, &manifest_path), (VAULT_DB_ENTRY, &snapshot_db), (VAULT_META_ENTRY, &snapshot_meta)])?;
+        let entry_refs: Vec<(&str, &Path)> = entries.iter().map(|(name, path)| (name.as_str(), path.as_path())).collect();
+        archive::write_container(dest_path, &entry_refs)?;
 
         Ok(BackupSummary { backup_id: manifest.backup_id, created_at: manifest.created_at })
     })();
@@ -530,7 +564,7 @@ mod tests {
 
         let manifest = inspect_backup(&dest).unwrap();
         assert_eq!(manifest.backup_format_version, BACKUP_FORMAT_VERSION);
-        assert_eq!(manifest.schema_version, 8);
+        assert_eq!(manifest.schema_version, 9);
         assert_eq!(manifest.backup_id, summary.backup_id);
     }
 
@@ -997,7 +1031,7 @@ mod tests {
         .unwrap();
 
         let err = restore_backup(&session, &vault_dir, &future, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap_err();
-        assert!(matches!(err, RestoreError::SchemaTooNew { backup_schema_version: 99, supported_schema_version: 8 }));
+        assert!(matches!(err, RestoreError::SchemaTooNew { backup_schema_version: 99, supported_schema_version: 9 }));
         assert_vault_untouched(&session, &vault_dir, "ContrasenaSegura2026!", 1);
     }
 
@@ -1145,5 +1179,238 @@ mod tests {
 
         assert_eq!(session.status(), VaultStatus::Unlocked);
         assert_eq!(patient_count(&session), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // Fase 16 (Documentos cifrados) — Backup/Restore obligatorio, Bloques 23-26 de la aprobación.
+    // ---------------------------------------------------------------
+
+    fn create_test_document(session: &VaultSession, vault_dir: &Path, patient_id: &str, sources_dir: &Path, filename: &str, contents: &[u8]) -> String {
+        let source_path = sources_dir.join(filename);
+        std::fs::write(&source_path, contents).unwrap();
+        let files_root = vault_dir.join("files");
+        let input = crate::services::documents::NewDocumentInput {
+            patient_id: patient_id.to_string(),
+            episode_id: None,
+            session_id: None,
+            category: Some("informe".to_string()),
+            description: None,
+            source_path: source_path.to_str().unwrap().to_string(),
+            mime_type: None,
+        };
+        crate::services::documents::create_document(session, &files_root, input).unwrap().id
+    }
+
+    #[test]
+    fn backup_without_any_document_still_contains_only_the_three_base_entries() {
+        let app_dir = temp_app_dir("docs-backup-none");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&app_dir, "ContrasenaSegura2026!");
+        create_test_patient(&session, "Paciente Sin Documentos");
+
+        let dest = app_dir.join("respaldo.cclinbackup");
+        create_backup(&session, &vault_dir, &dest).unwrap();
+        let manifest = inspect_backup(&dest).unwrap();
+        assert_eq!(manifest.files.len(), 2, "sin documentos, el manifest solo lista vault.db y vault.meta.json");
+    }
+
+    #[test]
+    fn backup_includes_a_single_document_ciphertext() {
+        let app_dir = temp_app_dir("docs-backup-one");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&app_dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&session, "Paciente Con Un Documento");
+        let sources = app_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        create_test_document(&session, &vault_dir, &patient_id, &sources, "informe.pdf", b"contenido ficticio de prueba");
+
+        let dest = app_dir.join("respaldo.cclinbackup");
+        create_backup(&session, &vault_dir, &dest).unwrap();
+        let manifest = inspect_backup(&dest).unwrap();
+
+        assert_eq!(manifest.files.len(), 3, "vault.db + vault.meta.json + un documento");
+        assert!(manifest.files.iter().any(|f| f.path.starts_with("files/") && f.path.ends_with(".enc")));
+    }
+
+    #[test]
+    fn backup_includes_several_documents() {
+        let app_dir = temp_app_dir("docs-backup-several");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&app_dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&session, "Paciente Con Varios Documentos");
+        let sources = app_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        create_test_document(&session, &vault_dir, &patient_id, &sources, "a.pdf", b"contenido a");
+        create_test_document(&session, &vault_dir, &patient_id, &sources, "b.pdf", b"contenido b");
+        create_test_document(&session, &vault_dir, &patient_id, &sources, "c.pdf", b"contenido c");
+
+        let dest = app_dir.join("respaldo.cclinbackup");
+        create_backup(&session, &vault_dir, &dest).unwrap();
+        let manifest = inspect_backup(&dest).unwrap();
+        assert_eq!(manifest.files.len(), 5, "vault.db + vault.meta.json + tres documentos");
+    }
+
+    #[test]
+    fn backup_includes_an_archived_documents_ciphertext_too() {
+        let app_dir = temp_app_dir("docs-backup-archived");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&app_dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&session, "Paciente Con Documento Archivado");
+        let sources = app_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let doc_id = create_test_document(&session, &vault_dir, &patient_id, &sources, "informe.pdf", b"contenido archivado");
+        session.with_connection(|conn| crate::services::documents::archive_document(conn, &doc_id)).unwrap().unwrap();
+
+        let dest = app_dir.join("respaldo.cclinbackup");
+        create_backup(&session, &vault_dir, &dest).unwrap();
+        let manifest = inspect_backup(&dest).unwrap();
+        assert_eq!(manifest.files.len(), 3, "el ciphertext de un documento archivado se respalda igual — nunca se borra por archivar");
+    }
+
+    #[test]
+    fn create_backup_fails_if_a_document_row_references_a_missing_ciphertext() {
+        let app_dir = temp_app_dir("docs-backup-missing-ciphertext");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&app_dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&session, "Paciente Con Ciphertext Perdido");
+        let sources = app_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        create_test_document(&session, &vault_dir, &patient_id, &sources, "informe.pdf", b"contenido");
+
+        // Simula que el archivo físico desapareció (por fuera de la app) sin que la fila de
+        // `documents` se haya actualizado — exactamente el escenario que Bloque 24 de la
+        // aprobación exige detectar en vez de producir un backup silenciosamente incompleto.
+        let files_root = vault_dir.join("files");
+        for shard in std::fs::read_dir(&files_root).unwrap() {
+            let shard = shard.unwrap().path();
+            for entry in std::fs::read_dir(&shard).unwrap() {
+                std::fs::remove_file(entry.unwrap().path()).unwrap();
+            }
+        }
+
+        let dest = app_dir.join("respaldo.cclinbackup");
+        let err = create_backup(&session, &vault_dir, &dest).unwrap_err();
+        assert!(matches!(err, BackupError::MissingDocumentFile(_)));
+        assert!(!dest.exists(), "no debe quedar ningún archivo de backup parcial en el destino");
+    }
+
+    #[test]
+    fn restore_recovers_documents_and_they_decrypt_correctly() {
+        let source_dir = temp_app_dir("docs-restore-source");
+        let (source_session, source_vault_dir, _rc) = new_unlocked_vault(&source_dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&source_session, "Paciente Del Respaldo Con Documento");
+        let sources = source_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let doc_id = create_test_document(&source_session, &source_vault_dir, &patient_id, &sources, "informe.pdf", b"contenido original a restaurar");
+
+        let dest = source_dir.join("respaldo.cclinbackup");
+        create_backup(&source_session, &source_vault_dir, &dest).unwrap();
+
+        let target_dir = temp_app_dir("docs-restore-target");
+        let target_vault_dir = target_dir.join("vault");
+        let target_session = VaultSession::new(&target_vault_dir);
+        restore_backup(&target_session, &target_vault_dir, &dest, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap();
+        target_session.unlock("ContrasenaSegura2026!").unwrap();
+
+        let target_files_root = target_vault_dir.join("files");
+        let (content, summary) = crate::services::documents::get_document_content(&target_session, &target_files_root, &doc_id).unwrap();
+        assert_eq!(content, b"contenido original a restaurar");
+        assert_eq!(summary.id, doc_id);
+    }
+
+    #[test]
+    fn restore_rejects_a_tampered_document_ciphertext() {
+        let dir = temp_app_dir("docs-restore-tampered-ciphertext");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&session, "Paciente Con Ciphertext Manipulado");
+        let sources = dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        create_test_document(&session, &vault_dir, &patient_id, &sources, "informe.pdf", b"contenido a manipular");
+
+        let good = dir.join("bueno.cclinbackup");
+        create_backup(&session, &vault_dir, &good).unwrap();
+
+        let extract_dir = dir.join("extract-for-tamper");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        let extracted = archive::extract_container(&good, &extract_dir).unwrap();
+        let document_entry = extracted.iter().find(|p| p.starts_with("files/")).unwrap().clone();
+
+        // Se manipula el ciphertext SIN actualizar su hash en el manifest — a diferencia del
+        // test de corrupción de `vault.db` (que aísla la capa de apertura), este confirma que
+        // la verificación genérica de hash por archivo (ya existente para cualquier entrada del
+        // manifest) cubre también los documentos, sin haber tenido que escribir ninguna
+        // verificación nueva para eso.
+        let doc_path = extract_dir.join(&document_entry);
+        let mut bytes = std::fs::read(&doc_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        std::fs::write(&doc_path, &bytes).unwrap();
+
+        let manifest_path = extract_dir.join(MANIFEST_ENTRY);
+        let db_path = extract_dir.join(VAULT_DB_ENTRY);
+        let meta_path = extract_dir.join(VAULT_META_ENTRY);
+        let entries: Vec<(&str, &Path)> = vec![
+            (MANIFEST_ENTRY, &manifest_path),
+            (VAULT_DB_ENTRY, &db_path),
+            (VAULT_META_ENTRY, &meta_path),
+            (document_entry.as_str(), &doc_path),
+        ];
+        let tampered = dir.join("manipulado.cclinbackup");
+        archive::write_container(&tampered, &entries).unwrap();
+
+        let err = restore_backup(&session, &vault_dir, &tampered, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap_err();
+        assert!(matches!(err, RestoreError::FileHashMismatch(p) if p == document_entry));
+        assert_vault_untouched(&session, &vault_dir, "ContrasenaSegura2026!", 1);
+    }
+
+    #[test]
+    fn restore_rejects_a_backup_missing_a_document_the_manifest_says_should_exist() {
+        let dir = temp_app_dir("docs-restore-missing-document");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&session, "Paciente Con Documento Faltante En El Zip");
+        let sources = dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        create_test_document(&session, &vault_dir, &patient_id, &sources, "informe.pdf", b"contenido");
+
+        let good = dir.join("bueno.cclinbackup");
+        create_backup(&session, &vault_dir, &good).unwrap();
+
+        let extract_dir = dir.join("extract-for-missing-doc");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        let extracted = archive::extract_container(&good, &extract_dir).unwrap();
+        let document_entry = extracted.iter().find(|p| p.starts_with("files/")).unwrap().clone();
+
+        // Reempaquetar SIN el archivo del documento, pero con el manifest original (que
+        // todavía lo lista) — el restore debe fallar de forma segura ANTES del swap, nunca
+        // restaurar parcialmente un vault sin sus documentos y presentarlo como exitoso
+        // (Bloque 25 de la aprobación).
+        let incomplete = dir.join("incompleto.cclinbackup");
+        archive::write_container(
+            &incomplete,
+            &[(MANIFEST_ENTRY, &extract_dir.join(MANIFEST_ENTRY)), (VAULT_DB_ENTRY, &extract_dir.join(VAULT_DB_ENTRY)), (VAULT_META_ENTRY, &extract_dir.join(VAULT_META_ENTRY))],
+        )
+        .unwrap();
+
+        let err = restore_backup(&session, &vault_dir, &incomplete, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap_err();
+        assert!(matches!(err, RestoreError::MissingRequiredFile(p) if p == document_entry));
+        assert_vault_untouched(&session, &vault_dir, "ContrasenaSegura2026!", 1);
+    }
+
+    #[test]
+    fn restoring_an_old_backup_without_any_documents_still_works() {
+        // Compatibilidad con backups de versiones anteriores a Fase 16 (Bloque 26 de la
+        // aprobación): un backup que nunca tuvo ningún documento (por ejemplo, creado antes de
+        // que existiera esta vertical) se restaura con normalidad — la ausencia de entradas
+        // `files/*` en el manifest nunca se interpreta como corrupción.
+        let source_dir = temp_app_dir("docs-restore-old-backup-no-files");
+        let (source_session, source_vault_dir, _rc) = new_unlocked_vault(&source_dir, "ContrasenaSegura2026!");
+        create_test_patient(&source_session, "Paciente Sin Documentos Nunca");
+        let dest = source_dir.join("respaldo.cclinbackup");
+        create_backup(&source_session, &source_vault_dir, &dest).unwrap();
+        let manifest = inspect_backup(&dest).unwrap();
+        assert!(manifest.files.iter().all(|f| !f.path.starts_with("files/")), "este backup nunca tuvo documentos");
+
+        let target_dir = temp_app_dir("docs-restore-old-backup-target");
+        let target_vault_dir = target_dir.join("vault");
+        let target_session = VaultSession::new(&target_vault_dir);
+        restore_backup(&target_session, &target_vault_dir, &dest, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap();
+        target_session.unlock("ContrasenaSegura2026!").unwrap();
+        assert_eq!(patient_count(&target_session), 1);
+        assert!(!target_vault_dir.join("files").exists(), "sin documentos en el backup, no debe crearse un directorio files/ vacío");
     }
 }
