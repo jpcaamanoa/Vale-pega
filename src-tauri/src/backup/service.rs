@@ -1158,6 +1158,46 @@ mod tests {
         assert_eq!(std::fs::read(vault_dir.join("vault.db")).unwrap(), b"contenido original");
     }
 
+    /// Fase 18 (validación pre-RC) — regresión de un hallazgo BLOCKER RC real, descubierto por
+    /// una prueba de crash/recovery end-to-end contra el binario compilado (no solo por el test
+    /// anterior, que ejercita `run_startup_recovery` en un aislamiento demasiado perfecto). El
+    /// llamador real (`lib.rs::run`) hace `let vault_dir = ...; std::fs::create_dir_all(&vault_dir)?;`
+    /// ANTES de llamar a `run_startup_recovery` — si ese orden se invierte alguna vez por error,
+    /// `vault_dir` "existe" artificialmente en el único caso real en que legítimamente no debería
+    /// existir todavía (crash exactamente entre mover el vault anterior a `rescue` y promover el
+    /// staging), `run_startup_recovery` toma la rama equivocada ("el rescue es basura segura") y
+    /// BORRA el vault real en vez de restaurarlo — pérdida de datos real, no teórica. Este test
+    /// reproduce la secuencia EXACTA de `lib.rs::run` (crear `vault_dir` en el momento indicado
+    /// relativo a la llamada de recuperación) en vez de manipular `vault_dir` libremente como hace
+    /// el test anterior, para que un futuro cambio accidental en `lib.rs` rompa este test de
+    /// inmediato en vez de pasar desapercibido con el resto de la suite en verde.
+    #[test]
+    fn startup_recovery_still_restores_the_rescued_vault_through_the_real_app_startup_sequence() {
+        let dir = temp_app_dir("startup-recovery-real-lib-rs-sequence");
+        let vault_dir = dir.join("vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(vault_dir.join("vault.db"), b"contenido original").unwrap();
+        std::fs::write(vault_dir.join("vault.meta.json"), b"{}").unwrap();
+
+        // Estado exacto de una interrupción real: el vault anterior ya se movió a rescue, el
+        // staging nunca llegó a promoverse, así que vault_dir NO existe en disco en este punto.
+        let rescue_dir = rescue_dir_for(&vault_dir).unwrap();
+        std::fs::rename(&vault_dir, &rescue_dir).unwrap();
+        assert!(!vault_dir.exists());
+
+        // Secuencia real de lib.rs::run — NUNCA `create_dir_all(vault_dir)` antes de esta línea.
+        run_startup_recovery(&vault_dir);
+        std::fs::create_dir_all(&vault_dir).unwrap();
+
+        assert!(vault_dir.exists());
+        assert!(!rescue_dir.exists(), "el rescue debe haberse restaurado a vault_dir, no quedar huérfano");
+        assert_eq!(
+            std::fs::read(vault_dir.join("vault.db")).unwrap(),
+            b"contenido original",
+            "el vault real no debe perderse — un create_dir_all antes de run_startup_recovery lo borraría en vez de restaurarlo"
+        );
+    }
+
     #[test]
     fn run_startup_recovery_cleans_up_an_orphaned_rescue_after_a_completed_restore() {
         let dir = temp_app_dir("startup-recovery-orphaned-rescue");

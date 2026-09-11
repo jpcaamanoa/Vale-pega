@@ -52,14 +52,22 @@ pub fn run() {
       }
 
       let vault_dir = app.path().app_data_dir()?.join("vault");
-      std::fs::create_dir_all(&vault_dir)?;
 
-      // Antes de que `VaultSession` lea el estado del disco (línea
-      // siguiente): recuperar de una posible interrupción a mitad de un
-      // `restore_backup` (Fase 10) — ver
-      // `backup::service::run_startup_recovery`. No hace nada en el caso
-      // normal.
+      // Fase 18 (validación pre-RC): `run_startup_recovery` decide qué hacer con un
+      // `vault-rescue` huérfano mirando si `vault_dir` existe en disco — si existe, asume que el
+      // `rescue` es basura segura de borrar (el `restore` ya promovió el staging); si NO existe,
+      // asume un crash a mitad de camino y restaura el `rescue`. Por eso este `create_dir_all`
+      // debe ejecutarse DESPUÉS de `run_startup_recovery`, nunca antes: crear `vault_dir` primero
+      // lo haría "existir" artificialmente en el único caso real en que legítimamente no debería
+      // existir todavía (crash exactamente entre mover el vault anterior a `rescue` y promover el
+      // staging) — la recuperación tomaría la rama equivocada y borraría el `rescue`, perdiendo el
+      // vault real en vez de restaurarlo. Descubierto en Fase 18 mediante una validación real de
+      // extremo a extremo (el test unitario de `run_startup_recovery` en aislamiento no lo
+      // detectaba, porque nunca ejercitaba el orden real de llamadas de `lib.rs`) — ver
+      // `restore_startup_recovery_still_restores_the_rescued_vault_through_the_real_app_startup_sequence`.
       backup::service::run_startup_recovery(&vault_dir);
+
+      std::fs::create_dir_all(&vault_dir)?;
 
       // Fase 16 (Documentos cifrados): barrido de temporales descifrados que
       // un crash de una sesión anterior pudiera haber dejado sin limpiar —
