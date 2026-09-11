@@ -915,6 +915,45 @@ mod tests {
         assert!(matches!(err, UnwrapFileKeyError::UnwrapFailed));
     }
 
+    /// Fase 18 (validación pre-RC, escenario H): un `wrapped_file_dek` manipulado (un solo byte
+    /// del ciphertext alterado) debe fallar la autenticación AES-256-GCM al desenvolver — nunca
+    /// producir una `FileKey` incorrecta en silencio. Mismo principio ya probado a nivel de
+    /// contenido del archivo (`document_crypto::tampered_ciphertext_is_rejected`), verificado aquí
+    /// explícitamente también a nivel de la propia envoltura de la DEK.
+    #[test]
+    fn a_tampered_wrapped_ciphertext_is_rejected() {
+        let dir = temp_vault_dir("crypto1-tampered-wrapped-ciphertext");
+        let session = VaultSession::new(&dir);
+        session.begin_creation("ContrasenaSegura2026!").unwrap();
+        session.confirm_creation().unwrap();
+
+        let file_key = [0x44u8; FILE_KEY_LEN];
+        let mut wrapped = session.wrap_file_key(&file_key).unwrap();
+        let last = wrapped.ciphertext.len() - 1;
+        wrapped.ciphertext[last] ^= 0xFF;
+
+        let err = session.unwrap_file_key(&wrapped, KeyWrapVersion::DomainSeparated).unwrap_err();
+        assert!(matches!(err, UnwrapFileKeyError::UnwrapFailed));
+    }
+
+    /// Fase 18 (validación pre-RC, escenario H): un `wrap_nonce` manipulado también debe fallar la
+    /// autenticación — el nonce es parte de la entrada autenticada de AES-256-GCM, no un dato
+    /// suelto que pueda cambiarse sin invalidar el ciphertext.
+    #[test]
+    fn a_tampered_wrap_nonce_is_rejected() {
+        let dir = temp_vault_dir("crypto1-tampered-wrap-nonce");
+        let session = VaultSession::new(&dir);
+        session.begin_creation("ContrasenaSegura2026!").unwrap();
+        session.confirm_creation().unwrap();
+
+        let file_key = [0x55u8; FILE_KEY_LEN];
+        let mut wrapped = session.wrap_file_key(&file_key).unwrap();
+        wrapped.nonce[0] ^= 0xFF;
+
+        let err = session.unwrap_file_key(&wrapped, KeyWrapVersion::DomainSeparated).unwrap_err();
+        assert!(matches!(err, UnwrapFileKeyError::UnwrapFailed));
+    }
+
     /// Fixture congelado del algoritmo EXACTO de Fase 16 (`key_wrap_version = 1`): DEK del vault
     /// usada directamente como clave AES-256-GCM, sin ninguna derivación. Los bytes de
     /// `LEGACY_FIXTURE_CIPHERTEXT` se calcularon UNA SOLA VEZ, de forma independiente, con un

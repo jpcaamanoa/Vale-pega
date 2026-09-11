@@ -515,19 +515,23 @@ presente desde fases anteriores).
 6 nuevos en `db::migrations` (columna presente desde el arranque, filas V9 existentes reciben
 `key_wrap_version = 1` al migrar a V10 sin tocar `wrapped_file_dek`, valor explícito `2` en una fila
 nueva, `DEFAULT` sigue siendo `1` si no se especifica, `CHECK` rechaza cualquier valor fuera de
-`{1, 2}`, idempotencia y preservación de datos anteriores a V10). 12 nuevos en `security::session`
+`{1, 2}`, idempotencia y preservación de datos anteriores a V10). 11 nuevos en `security::session`
 (roundtrip `DomainSeparated`, `wrap_file_key` produce siempre ese esquema, un envoltorio v2 no
 puede desenvolverse como v1 y viceversa, un **fixture legacy congelado** —bytes calculados una sola
 vez con un programa `aes-gcm` independiente, nunca con el código de este módulo— sigue
 desenvolviéndose correctamente como v1, HKDF es determinista y distinto tanto de la DEK del vault
 como entre DEKs distintas, conversión `KeyWrapVersion ↔ i64` en ambos sentidos y rechazo de valores
-desconocidos, wrap/unwrap bloqueados por igual sin importar la versión). 2 nuevos en
+desconocidos, wrap/unwrap bloqueados por igual sin importar la versión). 1 nuevo en
 `repositories::documents` (persistencia exacta de `key_wrap_version` para ambos valores
-soportados). 5 nuevos en `services::documents` (un documento `key_wrap_version = 1` construido con
+soportados). 4 nuevos en `services::documents` (un documento `key_wrap_version = 1` construido con
 el algoritmo legacy real sigue abriendo; un documento nuevo queda en `2` y abre igual;
 ambos —v1 y v2— siguen siendo legibles después de un cambio de contraseña y después de una
 recuperación por código). 1 nuevo en `backup::service` (un backup con documentos de ambos esquemas
 mezclados se restaura sin reenvolver ninguno, y ambos decodifican correctamente tras restaurar).
+Total: 6 + 2 + 11 + 1 + 4 + 1 = **25**, consistente con 766 → 791 (el informe de cierre original de
+Fase 17 sumaba este desglose incorrectamente como 28; corregido en Fase 18 tras reconciliar contra
+`git diff` — la cifra agregada de 25 siempre fue la correcta, el error era exclusivamente de
+redacción del desglose, no de tests realmente agregados/eliminados).
 
 ## 16. Limitaciones conocidas
 
