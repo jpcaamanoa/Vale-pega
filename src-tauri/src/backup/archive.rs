@@ -14,6 +14,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -67,8 +68,74 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
 /// Empaqueta `entries` (ruta relativa dentro del contenedor, ruta real en
 /// disco) en un único archivo ZIP sin comprimir en `dest`. `dest` no debe
 /// existir todavía — igual que `VACUUM INTO`, no sobrescribe en silencio.
+///
+/// BACKUP-1 (hardening pre-RC, Fase 17): el contenido se construye
+/// primero en un archivo **temporal hermano** de `dest` — mismo
+/// directorio, y por lo tanto garantizado en el mismo filesystem/volumen,
+/// incluso cuando `dest` está en un pendrive USB o una unidad de red — y
+/// solo se promueve a `dest` mediante `rename` una vez que el ZIP se
+/// escribió y sincronizó a disco por completo. Así, un fallo en cualquier
+/// punto de la construcción (E/S, un archivo fuente que desaparece, etc.)
+/// nunca deja en `dest` un archivo parcial que aparente ser un
+/// `.cclinbackup` exitoso: en el peor caso, lo que puede quedar huérfano
+/// es el temporal (con un nombre y extensión claramente distintos de
+/// `dest`, nunca el `.cclinbackup` final), y este código intenta
+/// eliminarlo de todas formas ante cualquier error.
+///
+/// Se investigó si existe en `std` (u otra dependencia ya presente en el
+/// proyecto) una primitiva de "promover solo si `dest` no existe todavía"
+/// verdaderamente atómica en Windows, macOS y Linux a la vez. No la hay:
+/// `std::fs::rename` reemplaza un destino existente en ambas plataformas
+/// en vez de fallar, y `std::fs::hard_link` sí falla si el destino ya
+/// existe pero exige que el filesystem soporte hard links — cosa que
+/// FAT32 y exFAT (los formatos más comunes en pendrives USB, el destino
+/// más habitual de un respaldo) no soportan, así que basar la promoción
+/// en hard links rompería backups a USB en el caso común en vez de
+/// arreglar el caso raro. Por eso se mantiene una comprobación defensiva
+/// de `dest.exists()` inmediatamente antes de la promoción (además de la
+/// que ya hace quien llama a esta función) y un `rename` final: queda una
+/// ventana de carrera residual, extremadamente pequeña, entre esa
+/// comprobación y el `rename` — ver `docs/backup-restore.md` para el
+/// detalle honesto de este límite conocido, deliberadamente no resuelto
+/// con criptografía propia, código `unsafe` ni una dependencia nueva.
 pub fn write_container(dest: &Path, entries: &[(&str, &Path)]) -> Result<(), ArchiveError> {
-    let file = File::create_new(dest)?;
+    if dest.exists() {
+        return Err(ArchiveError::Io(io::Error::from(io::ErrorKind::AlreadyExists)));
+    }
+    let parent = dest.parent().ok_or_else(|| {
+        ArchiveError::Io(io::Error::new(io::ErrorKind::InvalidInput, "el destino del contenedor no tiene directorio padre"))
+    })?;
+    let tmp_name = match dest.file_name() {
+        Some(name) => format!(".{}.tmp-{}", name.to_string_lossy(), Uuid::new_v4()),
+        None => format!(".cclinbackup.tmp-{}", Uuid::new_v4()),
+    };
+    let tmp_path = parent.join(tmp_name);
+
+    if let Err(e) = write_container_to(&tmp_path, entries) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Comprobación defensiva inmediatamente antes de la promoción (ver la
+    // documentación de la función sobre la carrera residual que esto no
+    // elimina del todo, solo reduce).
+    if dest.exists() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(ArchiveError::Io(io::Error::from(io::ErrorKind::AlreadyExists)));
+    }
+    std::fs::rename(&tmp_path, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        ArchiveError::Io(e)
+    })
+}
+
+/// Escribe el ZIP completo en `tmp_path` (que no debe existir todavía) y
+/// sincroniza su contenido a disco (`sync_all`) antes de devolver el
+/// control — para que, en el momento en que `write_container` promueve
+/// este archivo a `dest` mediante `rename`, sus bytes ya estén
+/// durablemente en disco y no solo en el caché de escritura del SO.
+fn write_container_to(tmp_path: &Path, entries: &[(&str, &Path)]) -> Result<(), ArchiveError> {
+    let file = File::create_new(tmp_path)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
@@ -77,7 +144,8 @@ pub fn write_container(dest: &Path, entries: &[(&str, &Path)]) -> Result<(), Arc
         let mut source = BufReader::new(File::open(real_path)?);
         io::copy(&mut source, &mut zip)?;
     }
-    zip.finish()?;
+    let file = zip.finish()?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -150,6 +218,52 @@ mod tests {
 
         let err = write_container(&container, &[("a.txt", &src)]).unwrap_err();
         assert!(matches!(err, ArchiveError::Io(_)));
+    }
+
+    /// BACKUP-1: si una de las fuentes desaparece a mitad de la construcción del contenedor
+    /// (aquí, simplemente nunca existió), `dest` nunca debe llegar a existir — a diferencia del
+    /// comportamiento anterior a Fase 17, donde `dest` se creaba de entrada con `create_new` y
+    /// quedaba en disco, a medio escribir, si una entrada posterior fallaba.
+    #[test]
+    fn write_container_never_leaves_a_partial_file_at_dest_when_a_source_is_missing() {
+        let dir = temp_dir("no-partial-dest-on-failure");
+        let src_ok = dir.join("a.txt");
+        std::fs::write(&src_ok, b"contenido A").unwrap();
+        let src_missing = dir.join("no-existe.txt");
+
+        let dest = dir.join("respaldo.cclinbackup");
+        let err = write_container(&dest, &[("a.txt", &src_ok), ("b.txt", &src_missing)]).unwrap_err();
+        assert!(matches!(err, ArchiveError::Io(_)));
+        assert!(!dest.exists(), "dest_path nunca debe aparecer cuando la construcción del contenedor falla");
+
+        // Tampoco debe quedar un temporal huérfano con un nombre que pudiera confundirse con un
+        // `.cclinbackup` válido: el único requisito exigido es que no aparezca en `dest`, pero se
+        // verifica además que la limpieza best-effort del temporal efectivamente ocurrió en este
+        // caso (fallo detectado de forma síncrona, sin crash de por medio).
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftover.is_empty(), "no debe quedar un temporal huérfano tras un fallo síncrono: {leftover:?}");
+    }
+
+    /// Tras una construcción exitosa, el temporal hermano usado internamente debe haber sido
+    /// promovido a `dest` (mediante `rename`) y no debe quedar ningún archivo `.tmp-*` adicional
+    /// en el directorio.
+    #[test]
+    fn write_container_leaves_no_stray_temporary_file_after_success() {
+        let dir = temp_dir("no-stray-tmp-after-success");
+        let src = dir.join("a.txt");
+        std::fs::write(&src, b"contenido A").unwrap();
+
+        let dest = dir.join("respaldo.cclinbackup");
+        write_container(&dest, &[("a.txt", &src)]).unwrap();
+        assert!(dest.exists());
+
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(!entries.iter().any(|name| name.contains(".tmp-")), "no debe quedar ningún temporal tras una construcción exitosa: {entries:?}");
     }
 
     #[test]

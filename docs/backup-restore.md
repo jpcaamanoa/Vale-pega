@@ -105,6 +105,73 @@ original: ya no es una decisión pendiente por causa de backup (el motivo que `d
 daba desde la Fase 1.8), sino una pregunta puramente de rendimiento futuro, sin ningún síntoma
 actual que la justifique. Ver la nota de corrección en `docs/db-schema.md`.
 
+## Escritura atómica del contenedor: BACKUP-1 (hardening pre-RC, Fase 17)
+
+Hasta Fase 16, `archive::write_container` creaba el archivo final `dest_path` con
+`File::create_new` como primer paso y lo iba llenando en el sitio: un fallo de E/S a mitad de
+camino (disco lleno, un archivo fuente que desaparece, la aplicación cerrada a la fuerza) podía
+dejar en `dest_path` un `.cclinbackup` parcial, indistinguible a simple vista de uno exitoso.
+Fase 17 corrige esto (hallazgo BACKUP-1 de `Auditoria-Pre-RC-Desktop-post-Fase-16.md`) sin cambiar
+`BACKUP_FORMAT_VERSION` ni el contenido/formato del contenedor:
+
+1. `write_container` construye el ZIP completo en un **archivo temporal hermano** de `dest_path`
+   — mismo directorio, con un nombre `.{nombre-de-dest}.tmp-<uuid>` — nunca en el directorio
+   `backup-scratch` bajo `app_data_dir` que ya usaba `create_backup` para el snapshot de
+   `vault.db` y las copias de los ciphertexts de documentos. La razón de usar un temporal
+   *hermano* y no ese `scratch` ya existente: `dest_path` puede estar en un pendrive USB o una
+   unidad de red, un volumen distinto de `app_data_dir`, y `std::fs::rename` **no** hace fallback
+   a copiar+borrar cuando el origen y el destino están en filesystems distintos — falla
+   directamente con un error de "cross-device link". Un temporal hermano garantiza que la
+   promoción final sea un `rename` dentro del mismo volumen que el destino elegido por la
+   usuaria, sea cual sea.
+2. Antes de promover, el archivo temporal se sincroniza a disco (`File::sync_all`) — sus bytes
+   quedan durables, no solo en el caché de escritura del sistema operativo.
+3. La promoción es un único `std::fs::rename(temporal, dest_path)`. Si `dest_path` ya existe (la
+   comprobación de entrada de `create_backup`, más una segunda comprobación defensiva
+   inmediatamente antes del `rename`), la operación se rechaza sin tocar `dest_path` y el
+   temporal se elimina.
+4. Ante **cualquier** error anterior a la promoción — al escribir el ZIP, al abrir una entrada, al
+   sincronizar a disco — el temporal se elimina en un intento best-effort y `dest_path` nunca
+   llega a existir.
+
+### Garantía exacta conseguida, y su límite honesto
+
+La propiedad garantizada es: **un fallo durante la construcción del backup nunca deja en
+`dest_path` un archivo parcial que aparente ser un `.cclinbackup` exitoso.** Se investigó si
+existe, en `std` o en alguna dependencia ya presente en el proyecto, una forma de promover el
+temporal a `dest_path` con semántica "solo si `dest_path` no existe todavía" que sea
+*verdaderamente* atómica (sin ninguna ventana de carrera) en Windows, macOS y Linux a la vez —
+no la hay:
+
+- `std::fs::rename` **reemplaza** un destino existente en las tres plataformas en vez de fallar
+  — no ofrece semántica no-clobber.
+- `std::fs::hard_link` sí falla atómicamente si el destino ya existe (en POSIX y en Windows), pero
+  exige que el filesystem soporte hard links — y **FAT32 y exFAT, los formatos más comunes en
+  pendrives USB (el destino más habitual de un respaldo manual), no los soportan**. Basar la
+  promoción en `hard_link` habría cambiado un problema raro (una colisión de nombre) por uno
+  común (los respaldos a USB fallando sistemáticamente), así que se descartó.
+
+En consecuencia, queda una ventana de carrera residual, extremadamente pequeña (entre la
+comprobación defensiva y el `rename` mismo), en la que, si otro proceso crea un archivo con
+exactamente el mismo `dest_path` en ese instante preciso, `rename` lo reemplazaría. En un
+escritorio de un único usuario, sin un adversario local, esta ventana no se considera un riesgo
+de seguridad práctico — pero se documenta aquí sin adornos, en vez de afirmar una garantía
+absoluta que técnicamente no existe. No se implementó código `unsafe` ni criptografía propia para
+cerrarla, ni se agregó una dependencia nueva solo para este detalle.
+
+### Temporal huérfano ante un crash del proceso
+
+Si el proceso completo muere (no un error controlado, sino un crash o un corte de energía) entre
+que el temporal hermano se creó y que se promovió o se limpió, puede quedar un archivo
+`.{nombre}.tmp-<uuid>` junto al `dest_path` elegido. A diferencia de `backup-scratch`,
+`vault-restore-tmp` y `vault-rescue` (todos bajo `app_data_dir`, limpiados por
+`run_startup_recovery` en cada arranque), este temporal vive en una ubicación arbitraria elegida
+por la usuaria — potencialmente un dispositivo externo que ni siquiera está conectado en el
+próximo arranque — así que **no hay barrido automático para él**. La usuaria puede necesitar
+borrarlo manualmente. Esto es una limitación conocida, no un nuevo backup corrupto: por diseño,
+su nombre nunca coincide con `dest_path` ni tiene la extensión `.cclinbackup`, así que nunca puede
+confundirse con un respaldo válido ni ser tomado por `inspect_backup`/`restore_backup` como uno.
+
 ## Restore: reemplazo, nunca fusión — staging, validación completa, swap atómico
 
 `restore_backup` (`src-tauri/src/backup/service.rs`) nunca escribe sobre el vault activo

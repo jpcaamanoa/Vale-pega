@@ -243,7 +243,17 @@ pub fn create_backup(session: &VaultSession, vault_dir: &Path, dest_path: &Path)
         entries.insert(0, (MANIFEST_ENTRY.to_string(), manifest_path));
 
         let entry_refs: Vec<(&str, &Path)> = entries.iter().map(|(name, path)| (name.as_str(), path.as_path())).collect();
-        archive::write_container(dest_path, &entry_refs)?;
+        // BACKUP-1: `write_container` ya construye el ZIP en un temporal hermano de `dest_path`
+        // y lo promueve con `rename` solo al terminar (ver su documentación) — aquí solo se
+        // traduce la variante de error de "el destino ya existe" (que puede surgir tanto al
+        // inicio de `write_container` como, más raramente, en su comprobación defensiva
+        // inmediatamente antes del `rename`) al mismo `BackupError::DestinationAlreadyExists`
+        // que ya usa la comprobación temprana de esta función, para que la UI reciba siempre el
+        // mismo error semántico sin importar en qué punto exacto se detectó la colisión.
+        archive::write_container(dest_path, &entry_refs).map_err(|e| match &e {
+            ArchiveError::Io(io_err) if io_err.kind() == io::ErrorKind::AlreadyExists => BackupError::DestinationAlreadyExists,
+            _ => BackupError::Archive(e),
+        })?;
 
         Ok(BackupSummary { backup_id: manifest.backup_id, created_at: manifest.created_at })
     })();
