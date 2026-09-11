@@ -1070,6 +1070,38 @@ BEGIN
 END;
 "#;
 
+/// CRYPTO-1 (hardening pre-RC, Fase 17) — aprobado en
+/// `Plan-Fase-17-Hardening-Pre-RC-pendiente-de-aprobacion.md`. Hasta esta fase, `wrap_file_key`/
+/// `unwrap_file_key` (`security::session`) usaban la DEK cruda del vault directamente como clave
+/// AES-256-GCM para envolver la DEK de cada documento — la misma DEK que, sin ninguna separación
+/// de dominio, también se usa como clave raw de SQLCipher (`PRAGMA key`). `key_wrap_version`
+/// versiona el **esquema de envoltura de la DEK del archivo**, un concepto distinto (y
+/// deliberadamente independiente en su numeración) de `format_version` (que versiona el formato
+/// físico del ciphertext `CCD1` en sí — encabezado, nonce, tag; ver `docs/documents.md`):
+///
+/// - `key_wrap_version = 1` ("legacy"): el algoritmo exacto de la Fase 16, sin cambios — DEK del
+///   vault usada directamente como clave AES-256-GCM. Se conserva indefinidamente para poder
+///   seguir leyendo los documentos que ya existen; `unwrap_file_key` nunca deja de soportarla.
+/// - `key_wrap_version = 2`: la misma DEK del archivo, con el mismo AES-256-GCM, pero la clave de
+///   envoltura ya no es la DEK cruda del vault sino una subclave derivada vía HKDF-SHA256 con
+///   separación de dominio (ver `security::session`). Es el único valor que
+///   `wrap_file_key`/`insert_document` producen para documentos nuevos desde esta fase.
+///
+/// **Puramente aditiva y sin ningún reenvolvimiento.** `ALTER TABLE ... ADD COLUMN` con
+/// `NOT NULL DEFAULT 1` — todas las filas de `documents` que ya existan (creadas en Fase 16, bajo
+/// el algoritmo legacy) reciben automáticamente `key_wrap_version = 1`, que es exactamente el
+/// algoritmo con el que en efecto fueron envueltas: la migración no cambia ni un byte de
+/// `wrapped_file_dek`/`wrap_nonce` de ninguna fila existente, solo documenta en una columna nueva
+/// qué algoritmo corresponde a cada una. No hay ninguna migración criptográfica automática, eager
+/// ni en background de v1 a v2 en esta fase — ver `docs/documents.md` para el riesgo residual
+/// documentado explícitamente. El `CHECK` limita la columna a los dos valores soportados; SQLite
+/// admite `CHECK` en `ALTER TABLE ADD COLUMN` desde la versión 3.25.0 (2018), muy por debajo de la
+/// 3.53.2 vendida por `libsqlite3-sys` en este proyecto.
+const SCHEMA_V10: &str = r#"
+ALTER TABLE documents ADD COLUMN key_wrap_version INTEGER NOT NULL DEFAULT 1
+  CHECK (key_wrap_version IN (1, 2));
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -1084,6 +1116,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V7).foreign_key_check(),
         M::up(SCHEMA_V8).foreign_key_check(),
         M::up(SCHEMA_V9).foreign_key_check(),
+        M::up(SCHEMA_V10).foreign_key_check(),
     ])
 }
 
@@ -2589,5 +2622,132 @@ mod tests {
 
         conn.execute("UPDATE scratch SET notes = 'agregado en V2' WHERE id = 1", [])
             .expect("la columna nueva de V2 debe existir y ser usable");
+    }
+
+    // ---------------------------------------------------------------
+    // CRYPTO-1 (hardening pre-RC, Fase 17): migración V10 — key_wrap_version en documents. Aditiva,
+    // sin ningún reenvolvimiento de filas existentes.
+    // ---------------------------------------------------------------
+    #[test]
+    fn fresh_database_has_v10_column() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v10");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(documents)").unwrap();
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(cols.contains(&"key_wrap_version".to_string()), "documents debe tener key_wrap_version desde el arranque");
+
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(schema_version, 10, "una base nueva V1..V10 debe terminar en el esquema más reciente");
+    }
+
+    #[test]
+    fn existing_document_rows_default_key_wrap_version_to_the_legacy_algorithm() {
+        // Simula exactamente el escenario real de actualización: una base que ya tenía una fila
+        // de `documents` creada bajo Fase 16 (solo hasta V9), migrada ahora a V10. La fila
+        // existente debe recibir key_wrap_version = 1 (legacy) — es literalmente el algoritmo con
+        // el que esa fila fue envuelta, no un valor arbitrario.
+        let path = temp_db_path("v10-existing-rows-default-to-legacy");
+        let k = key(0xEA);
+        let mut conn = open_vault(&path, &k).unwrap();
+        let up_to_v9 = Migrations::new(vec![
+            M::up(SCHEMA_V1).foreign_key_check(),
+            M::up(SCHEMA_V2).foreign_key_check(),
+            M::up(SCHEMA_V3).foreign_key_check(),
+            M::up(SCHEMA_V4).foreign_key_check(),
+            M::up(SCHEMA_V5).foreign_key_check(),
+            M::up(SCHEMA_V6).foreign_key_check(),
+            M::up(SCHEMA_V7).foreign_key_check(),
+            M::up(SCHEMA_V8).foreign_key_check(),
+            M::up(SCHEMA_V9).foreign_key_check(),
+        ]);
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        up_to_v9.to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path, wrapped_file_dek, wrap_nonce)
+             VALUES ('d1', 'p1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc', 'ZmFrZQ==', 'ZmFrZQ==')",
+            params!["a".repeat(64)],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).expect("V10 debe aplicarse sobre una base V9 con filas ya existentes");
+
+        let key_wrap_version: i64 = conn.query_row("SELECT key_wrap_version FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(key_wrap_version, 1, "una fila creada antes de V10 debe quedar en key_wrap_version = 1 (legacy), nunca en 2");
+
+        // Ninguna otra columna cambia de valor — la migración no reenvuelve nada.
+        let wrapped: String = conn.query_row("SELECT wrapped_file_dek FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(wrapped, "ZmFrZQ==", "V10 nunca debe tocar wrapped_file_dek de una fila existente");
+        let filename: String = conn.query_row("SELECT original_filename FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(filename, "informe.pdf");
+
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(schema_version, 10);
+    }
+
+    #[test]
+    fn a_new_document_row_can_explicitly_set_key_wrap_version_to_two() {
+        let (conn, _path, _key) = migrated_vault("v10-explicit-two");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path, key_wrap_version)
+             VALUES ('d1', 'p1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc', 2)",
+            params!["a".repeat(64)],
+        )
+        .unwrap();
+        let key_wrap_version: i64 = conn.query_row("SELECT key_wrap_version FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(key_wrap_version, 2);
+    }
+
+    #[test]
+    fn fresh_document_row_defaults_key_wrap_version_to_one_when_not_specified() {
+        let (conn, _path, _key) = migrated_vault("v10-default-without-specifying");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path)
+             VALUES ('d1', 'p1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc')",
+            params!["a".repeat(64)],
+        )
+        .unwrap();
+        let key_wrap_version: i64 = conn.query_row("SELECT key_wrap_version FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(key_wrap_version, 1, "el DEFAULT de la columna es 1, no 2 — solo el código nuevo pide explícitamente 2");
+    }
+
+    #[test]
+    fn key_wrap_version_rejects_any_value_outside_one_or_two() {
+        let (conn, _path, _key) = migrated_vault("v10-rejects-unsupported-values");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path, key_wrap_version)
+                 VALUES ('d1', 'p1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc', 3)",
+                params!["a".repeat(64)],
+            )
+            .expect_err("key_wrap_version fuera de {1,2} debe rechazarse a nivel de base de datos");
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    #[test]
+    fn v10_migration_is_idempotent_and_preserves_v1_document_data() {
+        let path = temp_db_path("v10-idempotent");
+        let k = key(0xEB);
+        let mut conn = open_vault(&path, &k).unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path)
+             VALUES ('d1', 'p1', 'informe.pdf', 'application/pdf', 10, ?1, 'files/ab/d1.enc')",
+            params!["a".repeat(64)],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1..V10 ya vigentes no debería fallar");
+
+        let key_wrap_version: i64 = conn.query_row("SELECT key_wrap_version FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(key_wrap_version, 1);
+        let filename: String = conn.query_row("SELECT original_filename FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(filename, "informe.pdf", "el dato existente no se pierde ni se altera al migrar a V10");
     }
 }

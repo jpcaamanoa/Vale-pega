@@ -574,7 +574,7 @@ mod tests {
 
         let manifest = inspect_backup(&dest).unwrap();
         assert_eq!(manifest.backup_format_version, BACKUP_FORMAT_VERSION);
-        assert_eq!(manifest.schema_version, 9);
+        assert_eq!(manifest.schema_version, 10);
         assert_eq!(manifest.backup_id, summary.backup_id);
     }
 
@@ -1041,7 +1041,7 @@ mod tests {
         .unwrap();
 
         let err = restore_backup(&session, &vault_dir, &future, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap_err();
-        assert!(matches!(err, RestoreError::SchemaTooNew { backup_schema_version: 99, supported_schema_version: 9 }));
+        assert!(matches!(err, RestoreError::SchemaTooNew { backup_schema_version: 99, supported_schema_version: 10 }));
         assert_vault_untouched(&session, &vault_dir, "ContrasenaSegura2026!", 1);
     }
 
