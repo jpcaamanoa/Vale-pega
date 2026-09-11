@@ -423,7 +423,12 @@ mod tests {
     #[test]
     fn resolve_within_files_root_rejects_an_uppercase_shard() {
         let root = Path::new("/vault/files-root");
-        let id = Uuid::new_v4();
+        // UUID fijo (no `Uuid::new_v4()`): su shard `ab` contiene letras hexadecimales, así que
+        // `.to_uppercase()` produce `AB`, genuinamente distinto de `ab` — a diferencia de un UUID
+        // aleatorio, cuyo shard puede caer en dos dígitos (p. ej. `73`), donde `.to_uppercase()`
+        // es un no-op y la ruta "en mayúsculas" resulta ser, en realidad, idéntica a la original
+        // válida, haciendo que el test fallara de forma intermitente (REG-1).
+        let id = Uuid::parse_str("ab3f1234-dced-4e35-b706-a76771eda3e0").unwrap();
         let shard_upper = id.to_string()[0..2].to_uppercase();
         let bad = format!("files/{shard_upper}/{id}.enc");
         let err = resolve_within_files_root(root, &bad).unwrap_err();
