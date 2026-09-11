@@ -23,6 +23,24 @@ const AUTO_LOCK_TICK_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    // MULTI-1 (hardening pre-RC, Fase 17): debe ser el PRIMER plugin registrado. Los plugins se
+    // inicializan síncronamente en el orden de registro, dentro de `Builder::build()` — es decir,
+    // antes de que corra el `.setup(...)` de más abajo, que abre `VaultSession`, ejecuta
+    // `run_startup_recovery` y `sweep_stale_temp_files` (ver
+    // `tauri::App::manager::initialize_plugins`, llamado desde `Builder::build` antes de que
+    // exista siquiera la oportunidad de ejecutar el `.setup()` del usuario). Si el proceso que
+    // arranca es una segunda instancia, el plugin reenvía sus argumentos a la instancia ya viva y
+    // termina el proceso actual (`std::process::exit`) dentro de su propia inicialización — por
+    // lo tanto ese `.setup(...)` nunca llega a ejecutarse para la segunda instancia: el vault
+    // activo de la primera instancia nunca se reinicializa, nunca se vuelve a correr el barrido
+    // de arranque, y nunca se abre una segunda conexión a `vault.db`. Cuaderno Clínico pasa así a
+    // ser explícitamente single-instance; el callback aquí solo enfoca la ventana ya existente.
+    .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+      if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+      }
+    }))
     .plugin(tauri_plugin_dialog::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
