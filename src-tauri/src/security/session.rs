@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
+use hkdf::Hkdf;
 use rusqlite::Connection;
+use sha2::Sha256;
 use zeroize::Zeroize;
 
 use crate::db::VaultKey;
@@ -131,10 +133,140 @@ impl std::error::Error for VaultLockedError {}
 // `envelope.rs`, porque la aprobación de Fase 16 acotó la modificación
 // exclusivamente a este archivo (`security/session.rs`), no a todo
 // `security/*`.
+//
+// CRYPTO-1 (hardening pre-RC, Fase 17) — aprobado en
+// `Plan-Fase-17-Hardening-Pre-RC-pendiente-de-aprobacion.md`: hasta aquí, la MISMA DEK del vault
+// se usaba tanto como clave raw de SQLCipher (`PRAGMA key`, `db::connection::open_vault`) como
+// clave AES-256-GCM para envolver la DEK de cada archivo — sin ninguna separación de dominio
+// criptográfica entre ambos usos. Se agrega `KeyWrapVersion` para distinguir dos esquemas de
+// envoltura, versionados en la columna `documents.key_wrap_version` (`SCHEMA_V10`):
+//
+// - `Legacy` (`key_wrap_version = 1`): el algoritmo exacto de Fase 16, sin cambios — la DEK del
+//   vault directamente como clave AES-256-GCM. Se sigue soportando indefinidamente para poder
+//   leer los documentos que ya existen; `wrap_file_key` nunca vuelve a producirlo.
+// - `DomainSeparated` (`key_wrap_version = 2`): la clave de envoltura ya no es la DEK cruda del
+//   vault, sino una subclave derivada vía HKDF-SHA256 (`derive_file_wrap_key`) — separación de
+//   dominio real. Es el único esquema que `wrap_file_key` produce desde esta fase.
+//
+// No hay ninguna migración automática de `Legacy` a `DomainSeparated`: un documento legacy
+// permanece en `Legacy` para siempre, salvo que una fase futura explícita decida remigrarlo. Ver
+// `docs/documents.md` para el riesgo residual documentado.
 // ---------------------------------------------------------------------
 
 pub const FILE_KEY_LEN: usize = 32;
 pub const FILE_KEY_WRAP_NONCE_LEN: usize = 12;
+
+/// Esquema usado para envolver la DEK de un archivo — corresponde 1:1 a la columna
+/// `documents.key_wrap_version` (`SCHEMA_V10`), pero como tipo validado en vez de un entero mágico
+/// propagándose por las capas de servicio/repositorio. Deliberadamente distinto, en concepto y en
+/// numeración, de `documents.format_version` (que versiona el formato físico del ciphertext CCD1
+/// en sí, no el esquema de envoltura de la DEK).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyWrapVersion {
+    /// Fase 16: la DEK cruda del vault, usada directamente como clave AES-256-GCM.
+    Legacy,
+    /// Fase 17 (CRYPTO-1): subclave derivada vía HKDF-SHA256 con separación de dominio.
+    DomainSeparated,
+}
+
+impl KeyWrapVersion {
+    pub fn as_i64(self) -> i64 {
+        match self {
+            KeyWrapVersion::Legacy => 1,
+            KeyWrapVersion::DomainSeparated => 2,
+        }
+    }
+}
+
+/// La columna `documents.key_wrap_version` trae un valor fuera de `{1, 2}` — no debería ocurrir
+/// nunca en la práctica gracias al `CHECK` de `SCHEMA_V10`, pero `TryFrom` deja la conversión
+/// explícita y sin pánico de todas formas, en vez de asumir silenciosamente un esquema por
+/// defecto ante un dato inesperado.
+#[derive(Debug)]
+pub struct UnknownKeyWrapVersion(pub i64);
+impl fmt::Display for UnknownKeyWrapVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "esquema de envoltura de clave desconocido: {}", self.0)
+    }
+}
+impl std::error::Error for UnknownKeyWrapVersion {}
+
+impl TryFrom<i64> for KeyWrapVersion {
+    type Error = UnknownKeyWrapVersion;
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(KeyWrapVersion::Legacy),
+            2 => Ok(KeyWrapVersion::DomainSeparated),
+            other => Err(UnknownKeyWrapVersion(other)),
+        }
+    }
+}
+
+/// Contexto HKDF de la derivación de la subclave de envoltura de archivos. El "v1" de esta cadena
+/// versiona la DERIVACIÓN HKDF en sí (su algoritmo/contexto) — un concepto distinto de
+/// `KeyWrapVersion::DomainSeparated` (`key_wrap_version = 2`), que versiona el ESQUEMA DE
+/// ENVOLTURA completo del documento. Son dos numeraciones independientes que coinciden en "1"/"2"
+/// por coincidencia de dónde está cada fase, no por relación entre sí — no cambiar este literal
+/// una vez que existan documentos `DomainSeparated` reales: dejarían de poder desenvolverse con la
+/// subclave correcta.
+const FILE_KEY_WRAP_HKDF_INFO: &[u8] = b"cuaderno-clinico:file-key-wrap:v1";
+
+/// Deriva la subclave de envoltura de archivos (CRYPTO-1) a partir de la DEK cruda del vault, vía
+/// HKDF-SHA256 (RFC 5869) — separación de dominio real frente al uso de esa misma DEK como clave
+/// raw de SQLCipher. `salt = None`: la entrada (la DEK del vault) ya es material de alta entropía
+/// generado por un CSPRNG (`security::random`), nunca una contraseña de baja entropía — un salt
+/// aleatorio no aportaría seguridad adicional aquí (RFC 5869 §3.1, "if the input key material is
+/// already cryptographically strong ... the salt value is not needed"). La subclave derivada
+/// recibe la misma higiene de memoria que el resto del material secreto del proyecto: se zeroiza
+/// explícitamente en cuanto termina de usarse (ver los dos llamadores).
+fn derive_file_wrap_key(vault_dek: &[u8; FILE_KEY_LEN]) -> [u8; FILE_KEY_LEN] {
+    let hk = Hkdf::<Sha256>::new(None, vault_dek);
+    let mut subkey = [0u8; FILE_KEY_LEN];
+    hk.expand(FILE_KEY_WRAP_HKDF_INFO, &mut subkey)
+        .expect("32 bytes de salida está muy por debajo del límite de HKDF-SHA256 (255 * 32 bytes, RFC 5869 §2.3)");
+    subkey
+}
+
+/// Envuelve `file_key` con `dek` (la DEK cruda del vault) usando el esquema `DomainSeparated`
+/// (`KeyWrapVersion::DomainSeparated`) — el único que se produce para documentos nuevos desde
+/// Fase 17. Función libre, parametrizada por la DEK en vez de método de `VaultSession`, para poder
+/// probarla con valores completamente conocidos sin necesitar un vault real desbloqueado.
+fn wrap_file_key_with_dek(dek: &[u8; FILE_KEY_LEN], file_key: &[u8; FILE_KEY_LEN]) -> Result<WrappedFileKey, WrapFileKeyError> {
+    let mut subkey = derive_file_wrap_key(dek);
+    let nonce_bytes = random::bytes::<FILE_KEY_WRAP_NONCE_LEN>().map_err(WrapFileKeyError::Random)?;
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(subkey));
+    subkey.zeroize();
+    let nonce = Nonce::from(nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(&nonce, file_key.as_slice())
+        .map_err(|_| WrapFileKeyError::EncryptionFailed)?;
+    Ok(WrappedFileKey { nonce: nonce_bytes, ciphertext })
+}
+
+/// Desenvuelve `wrapped` con `dek` (la DEK cruda del vault), despachando exclusivamente según
+/// `version` — la columna `documents.key_wrap_version` es la única fuente de verdad, nunca hay
+/// autodetección ni un intento de "probar con la otra versión si esta falla": una versión
+/// desconocida o un desenvolvimiento fallido son siempre un error explícito, nunca un fallback
+/// silencioso. Función libre por el mismo motivo que `wrap_file_key_with_dek`: testeable con
+/// valores completamente conocidos.
+fn unwrap_file_key_with_dek(dek: &[u8; FILE_KEY_LEN], wrapped: &WrappedFileKey, version: KeyWrapVersion) -> Result<FileKey, UnwrapFileKeyError> {
+    let nonce = Nonce::from(wrapped.nonce);
+    let mut plaintext = match version {
+        KeyWrapVersion::Legacy => {
+            let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*dek));
+            cipher.decrypt(&nonce, wrapped.ciphertext.as_slice()).map_err(|_| UnwrapFileKeyError::UnwrapFailed)?
+        }
+        KeyWrapVersion::DomainSeparated => {
+            let mut subkey = derive_file_wrap_key(dek);
+            let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(subkey));
+            subkey.zeroize();
+            cipher.decrypt(&nonce, wrapped.ciphertext.as_slice()).map_err(|_| UnwrapFileKeyError::UnwrapFailed)?
+        }
+    };
+    let result = <[u8; FILE_KEY_LEN]>::try_from(plaintext.as_slice()).map_err(|_| UnwrapFileKeyError::InvalidLength);
+    plaintext.zeroize();
+    result.map(FileKey)
+}
 
 /// Una DEK de archivo (Fase 16) ya desenvuelta — nunca la DEK del vault.
 /// Mismo criterio de higiene que `db::VaultKey`/`security::kdf::Kek`:
@@ -406,11 +538,46 @@ impl VaultSession {
         }
     }
 
-    /// Envuelve una DEK de archivo (Fase 16) con la DEK del vault de esta
-    /// sesión — la DEK del vault nunca sale de este método. Nonce aleatorio
-    /// nuevo en cada llamada, nunca reutilizado, mismo criterio que
-    /// `security::envelope::wrap_dek`.
+    /// Envuelve una DEK de archivo con la DEK del vault de esta sesión — la DEK del vault nunca
+    /// sale de este método. Nonce aleatorio nuevo en cada llamada, nunca reutilizado, mismo
+    /// criterio que `security::envelope::wrap_dek`. Desde Fase 17 (CRYPTO-1) produce
+    /// exclusivamente el esquema `KeyWrapVersion::DomainSeparated` — quien llama debe persistir
+    /// `KeyWrapVersion::DomainSeparated.as_i64()` (2) en `documents.key_wrap_version` junto al
+    /// resultado; este método no toca esa columna, solo produce el envoltorio.
     pub fn wrap_file_key(&self, file_key: &[u8; FILE_KEY_LEN]) -> Result<WrappedFileKey, WrapFileKeyError> {
+        let state = self.state.lock().unwrap();
+        let dek = match &*state {
+            State::Unlocked(session) => session.dek.expose_secret(),
+            _ => return Err(WrapFileKeyError::Locked),
+        };
+        wrap_file_key_with_dek(dek, file_key)
+    }
+
+    /// Desenvuelve una DEK de archivo con la DEK del vault de esta sesión, según el esquema
+    /// indicado por `version` — la columna `documents.key_wrap_version` de la fila en cuestión es
+    /// la única fuente de verdad sobre qué `KeyWrapVersion` corresponde; nunca hay autodetección
+    /// ni un intento silencioso con la otra versión. Devuelve la `FileKey` ya lista para usar —
+    /// nunca la DEK del vault en sí.
+    pub fn unwrap_file_key(&self, wrapped: &WrappedFileKey, version: KeyWrapVersion) -> Result<FileKey, UnwrapFileKeyError> {
+        let state = self.state.lock().unwrap();
+        let dek = match &*state {
+            State::Unlocked(session) => session.dek.expose_secret(),
+            _ => return Err(UnwrapFileKeyError::Locked),
+        };
+        unwrap_file_key_with_dek(dek, wrapped, version)
+    }
+
+    /// Solo para tests de integración de otras capas (`services::documents`) que necesitan
+    /// construir, con la DEK real de un vault de prueba ya desbloqueado, un envoltorio `Legacy`
+    /// (`key_wrap_version = 1`) realista — para verificar que los documentos que ya existían
+    /// antes de Fase 17 siguen abriendo correctamente. Es literalmente el cuerpo íntegro, sin
+    /// cambios, de lo que era `wrap_file_key` antes de esta fase. `#[cfg(test)]`: no se compila en
+    /// ningún build de release, y nunca expone la DEK del vault en sí fuera de este módulo — igual
+    /// que `wrap_file_key`, solo devuelve el envoltorio ya cifrado. No existe ningún camino de
+    /// producción (fuera de tests) que pueda producir un envoltorio `Legacy` nuevo: `wrap_file_key`
+    /// sin `cfg(test)` siempre produce `DomainSeparated`.
+    #[cfg(test)]
+    pub(crate) fn wrap_file_key_as_legacy_for_tests(&self, file_key: &[u8; FILE_KEY_LEN]) -> Result<WrappedFileKey, WrapFileKeyError> {
         let state = self.state.lock().unwrap();
         let dek = match &*state {
             State::Unlocked(session) => session.dek.expose_secret(),
@@ -419,32 +586,8 @@ impl VaultSession {
         let nonce_bytes = random::bytes::<FILE_KEY_WRAP_NONCE_LEN>().map_err(WrapFileKeyError::Random)?;
         let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*dek));
         let nonce = Nonce::from(nonce_bytes);
-        let ciphertext = cipher
-            .encrypt(&nonce, file_key.as_slice())
-            .map_err(|_| WrapFileKeyError::EncryptionFailed)?;
+        let ciphertext = cipher.encrypt(&nonce, file_key.as_slice()).map_err(|_| WrapFileKeyError::EncryptionFailed)?;
         Ok(WrappedFileKey { nonce: nonce_bytes, ciphertext })
-    }
-
-    /// Desenvuelve una DEK de archivo (Fase 16) con la DEK del vault de esta
-    /// sesión. Devuelve la `FileKey` ya lista para usar — nunca la DEK del
-    /// vault en sí.
-    pub fn unwrap_file_key(&self, wrapped: &WrappedFileKey) -> Result<FileKey, UnwrapFileKeyError> {
-        let state = self.state.lock().unwrap();
-        let dek = match &*state {
-            State::Unlocked(session) => session.dek.expose_secret(),
-            _ => return Err(UnwrapFileKeyError::Locked),
-        };
-        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*dek));
-        let nonce = Nonce::from(wrapped.nonce);
-        let mut plaintext = cipher
-            .decrypt(&nonce, wrapped.ciphertext.as_slice())
-            .map_err(|_| UnwrapFileKeyError::UnwrapFailed)?;
-        let result = <[u8; FILE_KEY_LEN]>::try_from(plaintext.as_slice()).map_err(|_| UnwrapFileKeyError::InvalidLength);
-        // El texto plano intermedio contiene la clave del archivo: no
-        // dejarlo en memoria más de lo necesario, mismo criterio que
-        // `security::envelope::unwrap_dek`.
-        plaintext.zeroize();
-        result.map(FileKey)
     }
 }
 
@@ -718,6 +861,142 @@ mod tests {
         // actividad registrada — no debería haber bloqueado todavía.
         assert!(!session.tick_auto_lock());
         assert_eq!(session.status(), VaultStatus::Unlocked);
+    }
+
+    // -----------------------------------------------------------------
+    // CRYPTO-1 (hardening pre-RC, Fase 17): HKDF-SHA256 domain-separated wrapping (v2) y
+    // compatibilidad indefinida con el algoritmo legacy (v1).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn wrap_then_unwrap_domain_separated_roundtrips() {
+        let dir = temp_vault_dir("crypto1-roundtrip-v2");
+        let session = VaultSession::new(&dir);
+        session.begin_creation("ContrasenaSegura2026!").unwrap();
+        session.confirm_creation().unwrap();
+
+        let file_key = [0x77u8; FILE_KEY_LEN];
+        let wrapped = session.wrap_file_key(&file_key).unwrap();
+        let unwrapped = session.unwrap_file_key(&wrapped, KeyWrapVersion::DomainSeparated).unwrap();
+        assert_eq!(unwrapped.expose_secret(), &file_key);
+    }
+
+    #[test]
+    fn wrap_file_key_always_produces_the_domain_separated_scheme() {
+        // No hay ninguna forma pública de producir un envoltorio v1 nuevo desde esta fase —
+        // wrap_file_key es, en sí mismo, la garantía de que ningún documento nuevo puede terminar
+        // en key_wrap_version = 1. Se comprueba indirectamente: lo que wrap_file_key produce solo
+        // puede desenvolverse correctamente con KeyWrapVersion::DomainSeparated.
+        let dir = temp_vault_dir("crypto1-wrap-always-v2");
+        let session = VaultSession::new(&dir);
+        session.begin_creation("ContrasenaSegura2026!").unwrap();
+        session.confirm_creation().unwrap();
+
+        let file_key = [0x55u8; FILE_KEY_LEN];
+        let wrapped = session.wrap_file_key(&file_key).unwrap();
+        assert!(session.unwrap_file_key(&wrapped, KeyWrapVersion::DomainSeparated).is_ok());
+    }
+
+    #[test]
+    fn a_domain_separated_wrapped_key_cannot_be_unwrapped_as_legacy() {
+        // Demuestra que la separación de dominio es real y no cosmética: la clave usada para
+        // envolver bajo v2 (la subclave derivada por HKDF) es genuinamente distinta de la DEK
+        // cruda del vault que usaría v1 — intentar desenvolver un envoltorio v2 como si fuera v1
+        // falla la autenticación de AES-256-GCM (clave incorrecta), nunca produce un resultado
+        // incorrecto en silencio.
+        let dir = temp_vault_dir("crypto1-v2-rejected-as-v1");
+        let session = VaultSession::new(&dir);
+        session.begin_creation("ContrasenaSegura2026!").unwrap();
+        session.confirm_creation().unwrap();
+
+        let file_key = [0x33u8; FILE_KEY_LEN];
+        let wrapped = session.wrap_file_key(&file_key).unwrap();
+        let err = session.unwrap_file_key(&wrapped, KeyWrapVersion::Legacy).unwrap_err();
+        assert!(matches!(err, UnwrapFileKeyError::UnwrapFailed));
+    }
+
+    /// Fixture congelado del algoritmo EXACTO de Fase 16 (`key_wrap_version = 1`): DEK del vault
+    /// usada directamente como clave AES-256-GCM, sin ninguna derivación. Los bytes de
+    /// `LEGACY_FIXTURE_CIPHERTEXT` se calcularon UNA SOLA VEZ, de forma independiente, con un
+    /// programa Rust desechable que usa directamente el crate `aes-gcm` (misma versión que este
+    /// proyecto) — nunca invocando `wrap_file_key`/`unwrap_file_key_with_dek` de este archivo.
+    /// Deliberado: si se generara dinámicamente en este mismo test usando el código de este
+    /// módulo, un cambio futuro que alterara silenciosamente el algoritmo "legacy" (por ejemplo,
+    /// si alguien agregara sin querer separación de dominio también a `Legacy`) podría cambiar
+    /// productor y consumidor a la vez sin que el test lo detectara. Con bytes fijos, ese cambio
+    /// rompe este test de inmediato.
+    const LEGACY_FIXTURE_VAULT_DEK: [u8; FILE_KEY_LEN] = [0x42; FILE_KEY_LEN];
+    const LEGACY_FIXTURE_FILE_KEY_PLAINTEXT: [u8; FILE_KEY_LEN] = [0x99; FILE_KEY_LEN];
+    const LEGACY_FIXTURE_NONCE: [u8; FILE_KEY_WRAP_NONCE_LEN] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const LEGACY_FIXTURE_CIPHERTEXT: [u8; 48] = [
+        44, 99, 191, 213, 212, 234, 208, 154, 21, 67, 40, 81, 211, 16, 247, 85, 9, 38, 90, 95, 158, 6, 174, 235, 23, 75, 69, 128, 6, 215, 151, 103, 168, 252,
+        217, 223, 208, 23, 39, 156, 179, 100, 18, 197, 82, 61, 209, 241,
+    ];
+
+    #[test]
+    fn unwrap_legacy_frozen_fixture_still_decrypts() {
+        let wrapped = WrappedFileKey { nonce: LEGACY_FIXTURE_NONCE, ciphertext: LEGACY_FIXTURE_CIPHERTEXT.to_vec() };
+        let unwrapped = unwrap_file_key_with_dek(&LEGACY_FIXTURE_VAULT_DEK, &wrapped, KeyWrapVersion::Legacy)
+            .expect("el algoritmo legacy (v1) debe seguir siendo legible indefinidamente, sin ninguna migración");
+        assert_eq!(unwrapped.expose_secret(), &LEGACY_FIXTURE_FILE_KEY_PLAINTEXT);
+    }
+
+    #[test]
+    fn legacy_frozen_fixture_cannot_be_unwrapped_as_domain_separated() {
+        let wrapped = WrappedFileKey { nonce: LEGACY_FIXTURE_NONCE, ciphertext: LEGACY_FIXTURE_CIPHERTEXT.to_vec() };
+        let err = unwrap_file_key_with_dek(&LEGACY_FIXTURE_VAULT_DEK, &wrapped, KeyWrapVersion::DomainSeparated).unwrap_err();
+        assert!(matches!(err, UnwrapFileKeyError::UnwrapFailed));
+    }
+
+    #[test]
+    fn derive_file_wrap_key_is_deterministic_for_the_same_vault_dek() {
+        let a = derive_file_wrap_key(&LEGACY_FIXTURE_VAULT_DEK);
+        let b = derive_file_wrap_key(&LEGACY_FIXTURE_VAULT_DEK);
+        assert_eq!(a, b, "HKDF debe ser determinista: la misma DEK del vault siempre deriva la misma subclave");
+    }
+
+    #[test]
+    fn derive_file_wrap_key_differs_from_the_vault_dek_itself() {
+        let derived = derive_file_wrap_key(&LEGACY_FIXTURE_VAULT_DEK);
+        assert_ne!(derived, LEGACY_FIXTURE_VAULT_DEK, "la subclave derivada nunca debe coincidir con la DEK cruda del vault");
+    }
+
+    #[test]
+    fn derive_file_wrap_key_differs_between_different_vault_deks() {
+        let dek_a = [0x11u8; FILE_KEY_LEN];
+        let dek_b = [0x22u8; FILE_KEY_LEN];
+        assert_ne!(derive_file_wrap_key(&dek_a), derive_file_wrap_key(&dek_b));
+    }
+
+    #[test]
+    fn key_wrap_version_round_trips_through_its_integer_representation() {
+        assert_eq!(KeyWrapVersion::Legacy.as_i64(), 1);
+        assert_eq!(KeyWrapVersion::DomainSeparated.as_i64(), 2);
+        assert_eq!(KeyWrapVersion::try_from(1).unwrap(), KeyWrapVersion::Legacy);
+        assert_eq!(KeyWrapVersion::try_from(2).unwrap(), KeyWrapVersion::DomainSeparated);
+    }
+
+    #[test]
+    fn key_wrap_version_rejects_any_value_outside_one_or_two() {
+        assert!(KeyWrapVersion::try_from(0).is_err());
+        assert!(KeyWrapVersion::try_from(3).is_err());
+        assert!(KeyWrapVersion::try_from(-1).is_err());
+    }
+
+    #[test]
+    fn wrap_and_unwrap_are_rejected_while_locked_regardless_of_version() {
+        let dir = temp_vault_dir("crypto1-locked");
+        let session = VaultSession::new(&dir);
+        session.begin_creation("ContrasenaSegura2026!").unwrap();
+        session.confirm_creation().unwrap();
+        let file_key = [0x66u8; FILE_KEY_LEN];
+        let wrapped = session.wrap_file_key(&file_key).unwrap();
+
+        session.lock();
+
+        assert!(matches!(session.wrap_file_key(&file_key).unwrap_err(), WrapFileKeyError::Locked));
+        assert!(matches!(session.unwrap_file_key(&wrapped, KeyWrapVersion::DomainSeparated).unwrap_err(), UnwrapFileKeyError::Locked));
+        assert!(matches!(session.unwrap_file_key(&wrapped, KeyWrapVersion::Legacy).unwrap_err(), UnwrapFileKeyError::Locked));
     }
 
     #[test]

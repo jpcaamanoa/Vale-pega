@@ -33,7 +33,7 @@ use crate::repositories::documents::{self, Document, DocumentMetadataUpdate, Doc
 use crate::repositories::patients;
 use crate::repositories::sessions;
 use crate::repositories::treatment_episodes as episodes_repo;
-use crate::security::{FileKey, UnwrapFileKeyError, VaultSession, WrapFileKeyError, WrappedFileKey, FILE_KEY_WRAP_NONCE_LEN};
+use crate::security::{FileKey, KeyWrapVersion, UnwrapFileKeyError, VaultSession, WrapFileKeyError, WrappedFileKey, FILE_KEY_WRAP_NONCE_LEN};
 use crate::services::document_crypto::{self, DocumentCryptoError, StoragePathError};
 
 /// Categorías administrativas válidas (Bloque 13 de la aprobación: se agrega `derivacion` a las
@@ -363,6 +363,11 @@ pub fn create_document(session: &VaultSession, files_root: &Path, input: NewDocu
                 description: description.as_deref(),
                 wrapped_file_dek: &wrapped_file_dek,
                 wrap_nonce: &wrap_nonce,
+                // CRYPTO-1 (Fase 17): todo documento nuevo se envuelve exclusivamente con el
+                // esquema domain-separated (session.wrap_file_key ya solo produce ese esquema) —
+                // se fija explícitamente aquí, nunca se depende del DEFAULT 1 de la columna, que
+                // existe únicamente para las filas legacy creadas antes de esta fase.
+                key_wrap_version: KeyWrapVersion::DomainSeparated.as_i64(),
             },
         )
     });
@@ -445,7 +450,12 @@ pub fn get_document_content(session: &VaultSession, files_root: &Path, id: &str)
     let abs_path = document_crypto::resolve_within_files_root(files_root, &doc.storage_path)?;
     let ciphertext = std::fs::read(&abs_path).map_err(|_| DocumentError::CorruptCryptoMetadata)?;
     let wrapped = columns_to_wrapped_key(&doc.wrapped_file_dek, &doc.wrap_nonce)?;
-    let file_key: FileKey = session.unwrap_file_key(&wrapped)?;
+    // CRYPTO-1 (Fase 17): la columna key_wrap_version de ESTA fila es la única fuente de verdad
+    // sobre qué esquema de envoltura usar — nunca autodetección ni un intento con el otro esquema
+    // si uno falla. Un valor fuera de {1, 2} no debería ocurrir nunca (CHECK de SCHEMA_V10), pero
+    // se trata igual como metadata criptográfica corrupta en vez de asumir un esquema por defecto.
+    let key_wrap_version = KeyWrapVersion::try_from(doc.key_wrap_version).map_err(|_| DocumentError::CorruptCryptoMetadata)?;
+    let file_key: FileKey = session.unwrap_file_key(&wrapped, key_wrap_version)?;
     let plaintext = document_crypto::decrypt_document(&ciphertext, file_key.expose_secret())?;
 
     // Verificación adicional de integridad (más allá de la autenticación ya provista por
@@ -628,6 +638,207 @@ mod tests {
         let (content, fetched) = get_document_content(&session, &files_root, &summary.id).unwrap();
         assert_eq!(content, b"bytes ficticios de una imagen");
         assert_eq!(fetched.id, summary.id);
+    }
+
+    /// CRYPTO-1 (Fase 17): un documento creado bajo el algoritmo EXACTO de Fase 16
+    /// (`key_wrap_version = 1`, DEK del vault directa) debe seguir abriendo correctamente —
+    /// nunca se migra automáticamente, nunca se reenvuelve. Se construye la fila manualmente
+    /// (en vez de vía `create_document`, que desde esta fase solo produce `key_wrap_version = 2`)
+    /// usando `wrap_file_key_as_legacy_for_tests` — el mismo cuerpo, sin cambios, de lo que era
+    /// `wrap_file_key` antes de esta fase.
+    #[test]
+    fn a_legacy_key_wrap_version_one_document_still_opens_correctly() {
+        let (session, files_root, _sources_dir) = test_env("legacy-v1-still-opens");
+        let patient_id = session.with_connection(|conn| create_test_patient(conn, "Paciente Legacy")).unwrap();
+
+        let plaintext = b"contenido de un documento creado antes de Fase 17";
+        let file_dek = document_crypto::generate_file_dek().unwrap();
+        let encrypted = document_crypto::encrypt_document(plaintext, &file_dek).unwrap();
+        let wrapped = session.wrap_file_key_as_legacy_for_tests(&file_dek).unwrap();
+        let (wrapped_file_dek, wrap_nonce) = wrapped_key_to_columns(&wrapped);
+
+        let document_id = Uuid::new_v4();
+        let storage_path = document_crypto::opaque_storage_path(document_id);
+        let abs_path = document_crypto::resolve_within_files_root(&files_root, &storage_path).unwrap();
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&abs_path, &encrypted).unwrap();
+
+        let sha256_plaintext = sha256_hex(plaintext);
+        session
+            .with_connection(|conn| {
+                documents::insert_document(
+                    conn,
+                    &documents::NewDocumentRow {
+                        id: &document_id.to_string(),
+                        patient_id: &patient_id,
+                        episode_id: None,
+                        session_id: None,
+                        category: Some("informe"),
+                        original_filename: "legacy.pdf",
+                        mime_type: "application/pdf",
+                        size_bytes: plaintext.len() as i64,
+                        sha256_plaintext: &sha256_plaintext,
+                        storage_path: &storage_path,
+                        description: None,
+                        wrapped_file_dek: &wrapped_file_dek,
+                        wrap_nonce: &wrap_nonce,
+                        key_wrap_version: 1,
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        let (content, fetched) = get_document_content(&session, &files_root, &document_id.to_string()).unwrap();
+        assert_eq!(content, plaintext);
+        assert_eq!(fetched.original_filename, "legacy.pdf");
+    }
+
+    /// Contraparte del test anterior: un documento nuevo (creado con `create_document`, esquema
+    /// `key_wrap_version = 2` desde esta fase) también abre correctamente — mismo `get_document_
+    /// content`, sin ninguna rama especial visible desde el llamador.
+    #[test]
+    fn a_new_domain_separated_key_wrap_version_two_document_opens_correctly() {
+        let (session, files_root, sources_dir) = test_env("v2-opens-correctly");
+        let patient_id = session.with_connection(|conn| create_test_patient(conn, "Paciente Nuevo")).unwrap();
+        let source = write_source_file(&sources_dir, "nuevo.pdf", b"contenido de un documento creado en Fase 17 o despues");
+
+        let summary = create_document(&session, &files_root, minimal_input(&patient_id, source)).unwrap();
+        let stored = session.with_connection(|conn| documents::find_document_by_id(conn, &summary.id)).unwrap().unwrap().unwrap();
+        assert_eq!(stored.key_wrap_version, 2, "todo documento nuevo debe quedar en key_wrap_version = 2");
+
+        let (content, _) = get_document_content(&session, &files_root, &summary.id).unwrap();
+        assert_eq!(content, b"contenido de un documento creado en Fase 17 o despues");
+    }
+
+    /// CRYPTO-1: cambiar la contraseña del vault re-envuelve la DEK del vault bajo una nueva
+    /// clave derivada de la nueva contraseña (`vault.meta.json`) — pero la DEK en sí no cambia
+    /// (`dek_is_unchanged_by_a_password_change`, `security::vault_manager`), así que ni
+    /// wrap_file_key ni unwrap_file_key dependen de la contraseña en ningún momento. Se comprueba
+    /// end-to-end para ambos esquemas: un documento legacy (v1) y uno domain-separated (v2) creados
+    /// ANTES del cambio de contraseña siguen abriendo exactamente igual después, incluso tras
+    /// bloquear y desbloquear de nuevo con la contraseña nueva.
+    #[test]
+    fn documents_of_both_key_wrap_versions_remain_readable_after_a_password_change() {
+        let (session, files_root, sources_dir) = test_env("password-change-preserves-v1-v2");
+        let patient_id = session.with_connection(|conn| create_test_patient(conn, "Paciente Contraseña")).unwrap();
+
+        let source = write_source_file(&sources_dir, "v2.pdf", b"contenido v2 antes del cambio de contrasena");
+        let v2_summary = create_document(&session, &files_root, minimal_input(&patient_id, source)).unwrap();
+
+        let plaintext_v1 = b"contenido v1 antes del cambio de contrasena";
+        let file_dek = document_crypto::generate_file_dek().unwrap();
+        let encrypted = document_crypto::encrypt_document(plaintext_v1, &file_dek).unwrap();
+        let wrapped = session.wrap_file_key_as_legacy_for_tests(&file_dek).unwrap();
+        let (wrapped_file_dek, wrap_nonce) = wrapped_key_to_columns(&wrapped);
+        let document_id = Uuid::new_v4();
+        let storage_path = document_crypto::opaque_storage_path(document_id);
+        let abs_path = document_crypto::resolve_within_files_root(&files_root, &storage_path).unwrap();
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&abs_path, &encrypted).unwrap();
+        let sha256_plaintext = sha256_hex(plaintext_v1);
+        session
+            .with_connection(|conn| {
+                documents::insert_document(
+                    conn,
+                    &documents::NewDocumentRow {
+                        id: &document_id.to_string(),
+                        patient_id: &patient_id,
+                        episode_id: None,
+                        session_id: None,
+                        category: Some("informe"),
+                        original_filename: "v1.pdf",
+                        mime_type: "application/pdf",
+                        size_bytes: plaintext_v1.len() as i64,
+                        sha256_plaintext: &sha256_plaintext,
+                        storage_path: &storage_path,
+                        description: None,
+                        wrapped_file_dek: &wrapped_file_dek,
+                        wrap_nonce: &wrap_nonce,
+                        key_wrap_version: 1,
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        session.change_password("una-contraseña-de-prueba-larga-1", "una-contraseña-completamente-nueva-2").unwrap();
+        session.lock();
+        session.unlock("una-contraseña-completamente-nueva-2").unwrap();
+
+        let (content_v2, _) = get_document_content(&session, &files_root, &v2_summary.id).unwrap();
+        assert_eq!(content_v2, b"contenido v2 antes del cambio de contrasena");
+        let (content_v1, _) = get_document_content(&session, &files_root, &document_id.to_string()).unwrap();
+        assert_eq!(content_v1, plaintext_v1);
+    }
+
+    /// Misma propiedad que el test anterior, pero para el flujo de recuperación por código en vez
+    /// de cambio de contraseña — `recover_access` también termina desenvolviendo la MISMA DEK del
+    /// vault (nunca genera una nueva), así que documentos v1 y v2 creados antes de recuperar el
+    /// acceso siguen abriendo exactamente igual después.
+    #[test]
+    fn documents_of_both_key_wrap_versions_remain_readable_after_recovery() {
+        let base = std::env::temp_dir().join(format!("cc-documents-svc-test-{}-recovery-preserves-v1-v2", std::process::id()));
+        if base.exists() {
+            std::fs::remove_dir_all(&base).unwrap();
+        }
+        let vault_dir = base.join("vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let files_root = vault_dir.join("files");
+        let sources_dir = base.join("sources");
+        std::fs::create_dir_all(&sources_dir).unwrap();
+
+        let session = VaultSession::new(&vault_dir);
+        let recovery_code = session.begin_creation("una-contraseña-de-prueba-larga-1").unwrap();
+        session.confirm_creation().unwrap();
+
+        let patient_id = session.with_connection(|conn| create_test_patient(conn, "Paciente Recuperación")).unwrap();
+        let source = write_source_file(&sources_dir, "v2.pdf", b"contenido v2 antes de recuperar acceso");
+        let v2_summary = create_document(&session, &files_root, minimal_input(&patient_id, source)).unwrap();
+
+        let plaintext_v1 = b"contenido v1 antes de recuperar acceso";
+        let file_dek = document_crypto::generate_file_dek().unwrap();
+        let encrypted = document_crypto::encrypt_document(plaintext_v1, &file_dek).unwrap();
+        let wrapped = session.wrap_file_key_as_legacy_for_tests(&file_dek).unwrap();
+        let (wrapped_file_dek, wrap_nonce) = wrapped_key_to_columns(&wrapped);
+        let document_id = Uuid::new_v4();
+        let storage_path = document_crypto::opaque_storage_path(document_id);
+        let abs_path = document_crypto::resolve_within_files_root(&files_root, &storage_path).unwrap();
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&abs_path, &encrypted).unwrap();
+        let sha256_plaintext = sha256_hex(plaintext_v1);
+        session
+            .with_connection(|conn| {
+                documents::insert_document(
+                    conn,
+                    &documents::NewDocumentRow {
+                        id: &document_id.to_string(),
+                        patient_id: &patient_id,
+                        episode_id: None,
+                        session_id: None,
+                        category: Some("informe"),
+                        original_filename: "v1.pdf",
+                        mime_type: "application/pdf",
+                        size_bytes: plaintext_v1.len() as i64,
+                        sha256_plaintext: &sha256_plaintext,
+                        storage_path: &storage_path,
+                        description: None,
+                        wrapped_file_dek: &wrapped_file_dek,
+                        wrap_nonce: &wrap_nonce,
+                        key_wrap_version: 1,
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        session.lock();
+        session.recover_access(&recovery_code, "una-contraseña-restablecida-3").unwrap();
+
+        let (content_v2, _) = get_document_content(&session, &files_root, &v2_summary.id).unwrap();
+        assert_eq!(content_v2, b"contenido v2 antes de recuperar acceso");
+        let (content_v1, _) = get_document_content(&session, &files_root, &document_id.to_string()).unwrap();
+        assert_eq!(content_v1, plaintext_v1);
     }
 
     #[test]

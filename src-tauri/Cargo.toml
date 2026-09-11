@@ -39,6 +39,7 @@ sha2 = "0.10"
 zip = { version = "8.6.0", default-features = false }
 tauri-plugin-dialog = "2.7.3"
 tauri-plugin-single-instance = "2.4.4"
+hkdf = "0.12.4"
 
 [dev-dependencies]
 tempfile = "3.27.0"

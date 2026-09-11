@@ -145,8 +145,11 @@ nunca convirtiendo `security::*` en el módulo de Documentos. Se agregaron dos m
 
 ```rust
 pub fn wrap_file_key(&self, file_key: &[u8; FILE_KEY_LEN]) -> Result<WrappedFileKey, WrapFileKeyError>
-pub fn unwrap_file_key(&self, wrapped: &WrappedFileKey) -> Result<FileKey, UnwrapFileKeyError>
+pub fn unwrap_file_key(&self, wrapped: &WrappedFileKey, version: KeyWrapVersion) -> Result<FileKey, UnwrapFileKeyError>
 ```
+
+(`unwrap_file_key` recibió un segundo parámetro, `version: KeyWrapVersion`, en Fase 17 — ver
+sección 4.1 más abajo. `wrap_file_key` mantiene su firma original.)
 
 Esta es exactamente la forma preferida por la aprobación (`wrap_file_key`/`unwrap_file_key`, no
 `get_vault_dek()`): **la DEK cruda del vault nunca cruza la frontera de `security::session`**.
@@ -168,6 +171,53 @@ ve la DEK del vault en sí.
 No fue necesario exponer la DEK cruda del vault en ningún punto — la condición de stop explícita
 de la aprobación ("si exponer material de clave resulta técnicamente necesario, detenerse y
 explicar por qué") nunca se activó.
+
+### 4.1. CRYPTO-1 (hardening pre-RC, Fase 17): separación de dominio con HKDF-SHA256
+
+Hasta aquí (Fase 16), `wrap_file_key`/`unwrap_file_key` usaban la DEK cruda del vault
+**directamente** como clave AES-256-GCM para envolver la DEK de cada archivo — la misma DEK que,
+sin ninguna separación de dominio, también se usa como clave raw de SQLCipher (`PRAGMA key`,
+`db::connection::open_vault`). La auditoría pre-RC (`Auditoria-Pre-RC-Desktop-post-Fase-16.md`,
+hallazgo CRYPTO-1) señaló esto como el único hallazgo B (bloqueante antes de RC) del dominio
+criptográfico. Fase 17 lo corrige **solo para documentos nuevos**, sin migrar los ya existentes:
+
+- **`documents.key_wrap_version`** (`SCHEMA_V10`, aditiva, `NOT NULL DEFAULT 1 CHECK (IN (1, 2))`)
+  versiona el **esquema de envoltura de la DEK del archivo** — un concepto y una numeración
+  deliberadamente independientes de `documents.format_version` (formato físico del ciphertext
+  `.enc`, sección 5). Ambas columnas conviven en la misma fila sin relación entre sí.
+- **`key_wrap_version = 1` ("legacy")**: el algoritmo exacto de Fase 16, sin ningún cambio — la DEK
+  cruda del vault como clave AES-256-GCM. Se sigue soportando **indefinidamente**: `unwrap_file_key`
+  nunca deja de aceptarlo. Toda fila creada antes de Fase 17 recibió este valor automáticamente al
+  migrar (por `DEFAULT`), porque es literalmente el algoritmo con el que fue envuelta.
+- **`key_wrap_version = 2` ("domain-separated")**: la clave de envoltura ya no es la DEK cruda del
+  vault, sino una subclave de 256 bits derivada vía **HKDF-SHA256** (RFC 5869,
+  `security::session::derive_file_wrap_key`, crate `hkdf` v0.12.4 — RustCrypto, la misma familia que
+  `aes-gcm`/`sha2`/`argon2` ya en uso, compatible con el `digest 0.10` que ya usa `sha2` en el
+  proyecto sin introducir una segunda versión de esa dependencia). `salt = None`: la entrada (la
+  DEK del vault) ya es material de alta entropía generado por un CSPRNG, nunca una contraseña —
+  RFC 5869 §3.1 no exige salt en ese caso. El `info` de la derivación es la constante
+  `b"cuaderno-clinico:file-key-wrap:v1"` — su "v1" versiona la **derivación HKDF en sí** (un
+  concepto distinto de `key_wrap_version = 2`, que versiona el **esquema de envoltura completo**;
+  ambas numeraciones coinciden en texto por casualidad, no por relación). `wrap_file_key` produce
+  **exclusivamente** este esquema desde Fase 17 — no existe ningún camino de producción para volver
+  a generar un envoltorio `key_wrap_version = 1` nuevo.
+
+**Sin migración automática, eager, lazy ni en background.** La columna `key_wrap_version` de cada
+fila es la única fuente de verdad sobre qué esquema usar al leer — `unwrap_file_key` despacha
+exclusivamente según ese valor, nunca hay autodetección ni un intento silencioso con el otro
+esquema si uno falla (una versión desconocida, o un fallo de autenticación AES-GCM, son siempre un
+error explícito). **Los documentos legacy de Fase 16 permanecen deliberadamente en
+`key_wrap_version = 1` para preservar compatibilidad y evitar una migración criptográfica riesgosa
+justo antes de RC.** Esto no es "una migración pendiente": `key_wrap_version = 1` es un estado
+válido y soportado, no una etapa transitoria — se evaluaron explícitamente tres estrategias de
+compatibilidad (migración eager al desbloquear, migración lazy al leer, compatibilidad dual
+permanente) en `Plan-Fase-17-Hardening-Pre-RC-pendiente-de-aprobacion.md` §6-9, y se descartaron
+las dos primeras por requerir de todas formas soporte de lectura dual indefinido (haciendo la
+migración una complejidad neta, no una simplificación) y por introducir riesgo de interacción con
+crash/auto-lock/multi-instancia a mitad de una re-envoltura. La remigración v1→v2 (una herramienta
+manual futura, opcional) queda **explícitamente diferida a una fase futura independiente** — su
+ausencia en documentos legacy es riesgo/deuda técnica residual **conocida y aceptada**, no un
+descuido.
 
 ## 5. Formato de archivo versionado (`.enc`)
 
@@ -420,8 +470,8 @@ services::documents   (reglas de negocio: asociaciones, proceso cerrado/paciente
    ▼
 repositories::documents  (SQL puro sobre `documents`)
    ▼
-security::VaultSession::wrap_file_key / unwrap_file_key   (única capacidad expuesta desde
-   │                                                        security/* — nunca la DEK cruda)
+security::VaultSession::wrap_file_key / unwrap_file_key(_, KeyWrapVersion)   (única capacidad
+   │                                    expuesta desde security/* — nunca la DEK cruda del vault)
    ▼
 SQLCipher (vault.db, metadata) + vault/files/<shard>/<uuid>.enc (ciphertext)
 ```
@@ -460,6 +510,25 @@ restaurable, traversal malicioso en una entrada de documento se rechaza).
 errores. `npm run lint`: sin errores nuevos (advertencias preexistentes de la misma categoría ya
 presente desde fases anteriores).
 
+### Fase 17 (CRYPTO-1): tests agregados
+
+6 nuevos en `db::migrations` (columna presente desde el arranque, filas V9 existentes reciben
+`key_wrap_version = 1` al migrar a V10 sin tocar `wrapped_file_dek`, valor explícito `2` en una fila
+nueva, `DEFAULT` sigue siendo `1` si no se especifica, `CHECK` rechaza cualquier valor fuera de
+`{1, 2}`, idempotencia y preservación de datos anteriores a V10). 12 nuevos en `security::session`
+(roundtrip `DomainSeparated`, `wrap_file_key` produce siempre ese esquema, un envoltorio v2 no
+puede desenvolverse como v1 y viceversa, un **fixture legacy congelado** —bytes calculados una sola
+vez con un programa `aes-gcm` independiente, nunca con el código de este módulo— sigue
+desenvolviéndose correctamente como v1, HKDF es determinista y distinto tanto de la DEK del vault
+como entre DEKs distintas, conversión `KeyWrapVersion ↔ i64` en ambos sentidos y rechazo de valores
+desconocidos, wrap/unwrap bloqueados por igual sin importar la versión). 2 nuevos en
+`repositories::documents` (persistencia exacta de `key_wrap_version` para ambos valores
+soportados). 5 nuevos en `services::documents` (un documento `key_wrap_version = 1` construido con
+el algoritmo legacy real sigue abriendo; un documento nuevo queda en `2` y abre igual;
+ambos —v1 y v2— siguen siendo legibles después de un cambio de contraseña y después de una
+recuperación por código). 1 nuevo en `backup::service` (un backup con documentos de ambos esquemas
+mezclados se restaura sin reenvolver ninguno, y ambos decodifican correctamente tras restaurar).
+
 ## 16. Limitaciones conocidas
 
 - Sin streaming/chunks — límite fijo de 50 MB por archivo en esta versión del formato (sección 5).
@@ -472,3 +541,9 @@ presente desde fases anteriores).
 - Sin firma electrónica de ningún tipo — solo almacenamiento de un consentimiento ya firmado
   externamente (sección 1).
 - Sin drag & drop — se evaluó no obligatorio frente al selector de archivos correcto.
+- **Documentos legacy sin separación de dominio criptográfica (CRYPTO-1, Fase 17).** Todo
+  documento creado antes de Fase 17 permanece en `key_wrap_version = 1`: su DEK de archivo sigue
+  envuelta con la DEK cruda del vault directamente, sin la separación de dominio HKDF que sí
+  reciben los documentos nuevos. Es una decisión deliberada (sección 4.1) para evitar una
+  migración criptográfica riesgosa justo antes de RC, no un descuido — pero es riesgo/deuda técnica
+  residual real y conocida hasta que una fase futura explícita decida remigrar esos documentos.

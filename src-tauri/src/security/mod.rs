@@ -30,6 +30,12 @@ pub use session::{VaultSession, VaultStatus};
 // `FileKey`. Consumido exclusivamente por `services::document_crypto`.
 pub use session::{FileKey, UnwrapFileKeyError, WrapFileKeyError, WrappedFileKey, FILE_KEY_WRAP_NONCE_LEN};
 
+// CRYPTO-1 (hardening pre-RC, Fase 17): esquema de envoltura de la DEK de un archivo, tipado en
+// vez de propagar el entero crudo de `documents.key_wrap_version` por las capas de
+// servicio/repositorio. Consumido por `services::documents`. `UnknownKeyWrapVersion` (el error de
+// `TryFrom<i64>`) no se re-exporta: quien la consume solo necesita su `Display` vía `DocumentError`.
+pub use session::KeyWrapVersion;
+
 // Re-exportado únicamente para `backup::service` (Fase 10): validar la
 // contraseña/código de recuperación de un vault en *staging* (una copia
 // restaurada temporal, nunca el vault activo de `VaultSession`) exige

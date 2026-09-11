@@ -48,6 +48,12 @@ pub struct Document {
     /// Base64 del nonce usado al envolver `wrapped_file_dek`.
     pub wrap_nonce: String,
     pub format_version: i64,
+    /// Esquema usado para envolver `wrapped_file_dek` (`SCHEMA_V10`, Fase 17/CRYPTO-1) — `1`
+    /// (legacy, DEK del vault directa) o `2` (HKDF domain-separated). Columna cruda; la
+    /// validación/tipado vive en `security::KeyWrapVersion`, consumida por
+    /// `services::documents`. Deliberadamente independiente de `format_version` (formato físico
+    /// del ciphertext CCD1) — ver `docs/documents.md`.
+    pub key_wrap_version: i64,
 }
 
 impl Document {
@@ -103,6 +109,12 @@ pub struct NewDocumentRow<'a> {
     pub description: Option<&'a str>,
     pub wrapped_file_dek: &'a str,
     pub wrap_nonce: &'a str,
+    /// Ver `Document::key_wrap_version`. Obligatorio (no `Option`, mismo criterio que
+    /// `wrapped_file_dek`/`wrap_nonce`): `services::documents::create_document` siempre lo fija
+    /// explícitamente a `KeyWrapVersion::DomainSeparated.as_i64()` (2) para documentos nuevos —
+    /// nunca depende del `DEFAULT 1` de la columna, que existe únicamente para las filas creadas
+    /// antes de esta fase.
+    pub key_wrap_version: i64,
 }
 
 pub struct DocumentMetadataUpdate<'a> {
@@ -112,7 +124,7 @@ pub struct DocumentMetadataUpdate<'a> {
 
 const DOCUMENT_COLUMNS: &str = "id, patient_id, episode_id, session_id, category, original_filename, mime_type, size_bytes, \
      sha256_plaintext, storage_path, is_clinical, description, created_at, updated_at, deleted_at, \
-     wrapped_file_dek, wrap_nonce, format_version";
+     wrapped_file_dek, wrap_nonce, format_version, key_wrap_version";
 
 const SUMMARY_COLUMNS: &str =
     "id, patient_id, episode_id, session_id, category, original_filename, mime_type, size_bytes, description, created_at, updated_at";
@@ -137,6 +149,7 @@ fn map_document_row(row: &Row) -> rusqlite::Result<Document> {
         wrapped_file_dek: row.get(15)?,
         wrap_nonce: row.get(16)?,
         format_version: row.get(17)?,
+        key_wrap_version: row.get(18)?,
     })
 }
 
@@ -163,8 +176,8 @@ fn map_summary_row(row: &Row) -> rusqlite::Result<DocumentSummary> {
 pub fn insert_document(conn: &Connection, row: &NewDocumentRow) -> rusqlite::Result<Document> {
     conn.execute(
         "INSERT INTO documents (id, patient_id, episode_id, session_id, category, original_filename, mime_type, size_bytes, \
-             sha256_plaintext, storage_path, is_clinical, description, wrapped_file_dek, wrap_nonce, format_version) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, 1)",
+             sha256_plaintext, storage_path, is_clinical, description, wrapped_file_dek, wrap_nonce, format_version, key_wrap_version) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, 1, ?14)",
         params![
             row.id,
             row.patient_id,
@@ -179,6 +192,7 @@ pub fn insert_document(conn: &Connection, row: &NewDocumentRow) -> rusqlite::Res
             row.description,
             row.wrapped_file_dek,
             row.wrap_nonce,
+            row.key_wrap_version,
         ],
     )?;
     find_document_by_id(conn, row.id).map(|opt| opt.expect("se acaba de insertar"))
@@ -341,6 +355,7 @@ mod tests {
             description: None,
             wrapped_file_dek: "d2VsbA==",
             wrap_nonce: "bm9uY2U=",
+            key_wrap_version: 2,
         }
     }
 
@@ -353,7 +368,29 @@ mod tests {
         assert_eq!(doc.category.as_deref(), Some("informe"));
         assert!(doc.is_clinical);
         assert_eq!(doc.format_version, 1);
+        assert_eq!(doc.key_wrap_version, 2, "sample_row simula lo que produce el código de creación actual: siempre 2");
         assert!(find_document_by_id(&conn, "d1").unwrap().is_some());
+    }
+
+    #[test]
+    fn key_wrap_version_persists_exactly_as_given_for_both_supported_values() {
+        let conn = test_conn("key-wrap-version-persists");
+        let patient_id = create_test_patient(&conn, "Paciente Once");
+
+        let mut legacy_row = sample_row("d1", &patient_id);
+        legacy_row.key_wrap_version = 1;
+        let legacy = insert_document(&conn, &legacy_row).unwrap();
+        assert_eq!(legacy.key_wrap_version, 1);
+
+        let mut v2_row = sample_row("d2", &patient_id);
+        v2_row.key_wrap_version = 2;
+        let v2 = insert_document(&conn, &v2_row).unwrap();
+        assert_eq!(v2.key_wrap_version, 2);
+
+        // Releer desde cero confirma que el valor persistido en disco (no solo el devuelto por
+        // insert_document) es el correcto para cada fila.
+        assert_eq!(find_document_by_id(&conn, "d1").unwrap().unwrap().key_wrap_version, 1);
+        assert_eq!(find_document_by_id(&conn, "d2").unwrap().unwrap().key_wrap_version, 2);
     }
 
     #[test]

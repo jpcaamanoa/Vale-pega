@@ -1323,6 +1323,94 @@ mod tests {
         assert_eq!(summary.id, doc_id);
     }
 
+    /// CRYPTO-1 (Fase 17): un backup construido con documentos de AMBOS esquemas de envoltura
+    /// (uno legacy, `key_wrap_version = 1`, insertado manualmente con la misma técnica que
+    /// `services::documents::tests::a_legacy_key_wrap_version_one_document_still_opens_correctly`;
+    /// otro nuevo, `key_wrap_version = 2`, vía `create_test_document`) se respalda y se restaura
+    /// sin perder la distinción entre ambos — ninguno se reenvuelve durante el ciclo, y ambos
+    /// decodifican correctamente tras la restauración.
+    #[test]
+    fn backup_and_restore_preserve_mixed_key_wrap_versions() {
+        use base64ct::{Base64, Encoding};
+        use crate::services::document_crypto;
+        use crate::services::documents as documents_svc;
+
+        fn sha256_hex(data: &[u8]) -> String {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            format!("{:x}", hasher.finalize())
+        }
+
+        let source_dir = temp_app_dir("docs-mixed-key-wrap-source");
+        let (source_session, source_vault_dir, _rc) = new_unlocked_vault(&source_dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&source_session, "Paciente Con Documentos Mixtos");
+        let sources = source_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+
+        let v2_doc_id = create_test_document(&source_session, &source_vault_dir, &patient_id, &sources, "v2.pdf", b"contenido v2 antes del backup");
+
+        let plaintext_v1 = b"contenido v1 antes del backup";
+        let file_dek = document_crypto::generate_file_dek().unwrap();
+        let encrypted = document_crypto::encrypt_document(plaintext_v1, &file_dek).unwrap();
+        let wrapped = source_session.wrap_file_key_as_legacy_for_tests(&file_dek).unwrap();
+        let wrapped_file_dek = Base64::encode_string(&wrapped.ciphertext);
+        let wrap_nonce = Base64::encode_string(&wrapped.nonce);
+        let v1_files_root = source_vault_dir.join("files");
+        let v1_doc_id = Uuid::new_v4();
+        let storage_path = document_crypto::opaque_storage_path(v1_doc_id);
+        let abs_path = document_crypto::resolve_within_files_root(&v1_files_root, &storage_path).unwrap();
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&abs_path, &encrypted).unwrap();
+        let sha256_plaintext = sha256_hex(plaintext_v1);
+        source_session
+            .with_connection(|conn| {
+                crate::repositories::documents::insert_document(
+                    conn,
+                    &crate::repositories::documents::NewDocumentRow {
+                        id: &v1_doc_id.to_string(),
+                        patient_id: &patient_id,
+                        episode_id: None,
+                        session_id: None,
+                        category: Some("informe"),
+                        original_filename: "v1.pdf",
+                        mime_type: "application/pdf",
+                        size_bytes: plaintext_v1.len() as i64,
+                        sha256_plaintext: &sha256_plaintext,
+                        storage_path: &storage_path,
+                        description: None,
+                        wrapped_file_dek: &wrapped_file_dek,
+                        wrap_nonce: &wrap_nonce,
+                        key_wrap_version: 1,
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        let dest = source_dir.join("respaldo.cclinbackup");
+        create_backup(&source_session, &source_vault_dir, &dest).unwrap();
+        let manifest = inspect_backup(&dest).unwrap();
+        assert_eq!(manifest.files.len(), 4, "vault.db + vault.meta.json + dos documentos (v1 y v2)");
+
+        let target_dir = temp_app_dir("docs-mixed-key-wrap-target");
+        let target_vault_dir = target_dir.join("vault");
+        let target_session = VaultSession::new(&target_vault_dir);
+        restore_backup(&target_session, &target_vault_dir, &dest, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap();
+        target_session.unlock("ContrasenaSegura2026!").unwrap();
+
+        let target_files_root = target_vault_dir.join("files");
+        let restored_v1 = target_session.with_connection(|conn| crate::repositories::documents::find_document_by_id(conn, &v1_doc_id.to_string())).unwrap().unwrap().unwrap();
+        assert_eq!(restored_v1.key_wrap_version, 1, "el restore nunca reenvuelve un documento legacy a v2");
+        let restored_v2 = target_session.with_connection(|conn| crate::repositories::documents::find_document_by_id(conn, &v2_doc_id)).unwrap().unwrap().unwrap();
+        assert_eq!(restored_v2.key_wrap_version, 2);
+
+        let (content_v1, _) = documents_svc::get_document_content(&target_session, &target_files_root, &v1_doc_id.to_string()).unwrap();
+        assert_eq!(content_v1, plaintext_v1);
+        let (content_v2, _) = documents_svc::get_document_content(&target_session, &target_files_root, &v2_doc_id).unwrap();
+        assert_eq!(content_v2, b"contenido v2 antes del backup");
+    }
+
     #[test]
     fn restore_rejects_a_tampered_document_ciphertext() {
         let dir = temp_app_dir("docs-restore-tampered-ciphertext");
