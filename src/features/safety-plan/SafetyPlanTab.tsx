@@ -8,6 +8,7 @@ import { TextField } from '../../components/ui/TextField'
 import { Textarea } from '../../components/ui/Textarea'
 import { formatSessionDate } from '../sessions/datetime'
 import { safetyPlanApi } from './api'
+import { SafetyPlanExportModal } from './SafetyPlanExport'
 import { safetyPlanContactFormSchema, safetyPlanFormSchema, type SafetyPlanContactFormValues, type SafetyPlanFormValues } from './schema'
 import {
   CREATABLE_SAFETY_PLAN_CONTACT_TYPES,
@@ -874,6 +875,7 @@ export function SafetyPlanTab({ patientId, patientArchived }: { patientId: strin
   const [error, setError] = useState<string | null>(null)
   const [view, setView] = useState<'main' | 'edit' | 'history'>('main')
   const [creating, setCreating] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const load = () => {
     setError(null)
@@ -996,18 +998,25 @@ export function SafetyPlanTab({ patientId, patientArchived }: { patientId: strin
               {current.reviewedAt && <p className="mt-1 text-sm text-muted-foreground">Última revisión: {formatSessionDate(current.reviewedAt)}</p>}
             </div>
             <div className="flex gap-2">
-              <Button variant="secondary" onClick={() => setView('history')}>
-                Ver historial
-              </Button>
               {canCreate && !draft && (
                 <Button variant="secondary" onClick={startUpdate} disabled={creating}>
                   {creating ? 'Preparando…' : 'Actualizar plan'}
                 </Button>
               )}
+              <Button variant="secondary" onClick={() => setExporting(true)}>
+                Exportar plan
+              </Button>
+              <Button variant="secondary" onClick={() => setView('history')}>
+                Ver historial
+              </Button>
             </div>
           </div>
           <PlanContent plan={current} contacts={currentContacts} items={currentItems} />
         </div>
+      )}
+
+      {exporting && current && (
+        <SafetyPlanExportModal patientId={patientId} plan={current} contacts={currentContacts} items={currentItems} onClose={() => setExporting(false)} />
       )}
     </div>
   )

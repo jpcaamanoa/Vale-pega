@@ -51,4 +51,21 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
+
+  /* Exportar/Imprimir el Plan de Seguridad (FASE 3) reutiliza el diálogo nativo de impresión del
+     WebView (`window.print()`) — "Guardar como PDF" es una opción de destino estándar en ese
+     diálogo tanto en Windows como en macOS, así que no hace falta ninguna librería de generación
+     de PDF. `#print-root` es un portal (ver `SafetyPlanExport.tsx`), montado como hermano de
+     `#root` directamente en `<body>`: normalmente invisible, y es lo único visible al imprimir. */
+  #print-root {
+    display: none;
+  }
+  @media print {
+    #root {
+      display: none !important;
+    }
+    #print-root {
+      display: block !important;
+    }
+  }
 }

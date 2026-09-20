@@ -435,3 +435,61 @@ conexión sin error.
 qué migraciones existen ni qué hacen, solo asegura que se ejecuten. Queda pendiente la validación
 manual real en Windows sobre el mismo vault preexistente que originó el reporte (ver checklist en
 el informe de cierre de esta fase) antes de considerar el hallazgo cerrado.
+
+## 22. Exportar/Imprimir el plan vigente (FASE 3, autorizada explícitamente)
+
+Acción "Exportar plan" junto a "Actualizar plan"/"Ver historial", solo visible con un plan vigente.
+Abre un modal con una casilla "Incluir nombre del paciente" (marcada por defecto) y la advertencia
+de privacidad ("la copia exportada ya no está protegida por el cifrado de Cuaderno Clínico…") antes
+de generar nada.
+
+### Sin dependencia nueva — `window.print()` nativo del WebView
+
+**Decisión de diseño explícita, dentro de la regla de parada de dependencias del pedido de esta
+fase**: en vez de agregar una librería Rust de generación de PDF (`printpdf`, `genpdf`, etc.), se
+usa el diálogo de impresión nativo del WebView (`window.print()`) — "Guardar como PDF" (Microsoft
+Print to PDF en Windows, el destino PDF nativo de macOS) es una opción de destino estándar de ese
+diálogo en ambas plataformas. **Cero dependencias nuevas, ninguna superficie de ataque adicional.**
+El mismo botón sirve para "Exportar" e "Imprimir" — exactamente el mismo documento renderizado, sin
+segunda implementación.
+
+Mecanismo (`src/features/safety-plan/SafetyPlanExport.tsx`): el contenido a exportar se renderiza
+vía un React Portal dentro de un `<div id="print-root">`, creado como **hermano** de `#root`
+directamente en `<body>` (nunca dentro de `#root`) — dos reglas nuevas en `index.css`:
+`#print-root { display: none }` en pantalla, y bajo `@media print`, `#root { display: none }` +
+`#print-root { display: block }`. El resto de la aplicación nunca se envía al diálogo de impresión;
+solo el documento del plan.
+
+### Contenido — solo lo que ya se le muestra a la usuaria en pantalla
+
+El documento reutiliza exactamente los mismos `plan`/`contacts`/`items` ya cargados para
+`PlanContent` (la vista en pantalla del plan vigente) — nunca un fetch adicional ni una fuente de
+datos distinta. Título "PLAN DE SEGURIDAD", los seis pasos con sus encabezados, listas/contactos
+con teléfono/dirección/marcadores de emergencia visibles, fecha de confirmación/última revisión.
+
+**Explícitamente excluido, por construcción** (nunca se le pasa al componente de impresión):
+diagnóstico, motivo de consulta, notas clínicas, antecedentes, sesiones, formulación, objetivos,
+evaluaciones, UUIDs, IDs, metadata de base de datos, historial de versiones, borradores, logs,
+claves. Por defecto solo se exporta el plan **vigente** — nunca una versión histórica desde este
+modal (ver historial en su propia pantalla, sin acción de exportar todavía).
+
+### Nombre del paciente opcional
+
+El nombre (`preferredName || fullName`, obtenido con `patientsApi.get`) solo se incluye en el
+documento si la casilla está marcada — permite generar tanto una versión identificada como una
+completamente anónima del mismo plan, sin volver a armar el contenido.
+
+### Destino: siempre elegido por la usuaria
+
+El diálogo nativo de impresión es quien pregunta el destino (una carpeta y nombre de archivo para
+"Guardar como PDF", o una impresora física) — nunca se escribe a una ruta fija ni se sube a ningún
+servicio externo. Cancelar el diálogo de impresión no genera ningún archivo parcial (comportamiento
+nativo del sistema operativo, no código de esta aplicación).
+
+### Tests
+
+Sin framework de tests de frontend instalado (constraint preexistente, ver informes anteriores) —
+validado por `tsc -b` estricto y lectura de código. El contenido narrativo/de listas reutiliza
+exactamente los mismos datos ya cubiertos por los 65 tests de `services::safety_plans` — no hay
+lógica de negocio nueva en el backend para esta fase, solo una nueva representación de datos ya
+validados en el frontend.
