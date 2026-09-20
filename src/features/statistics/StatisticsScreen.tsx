@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { communesForRegion } from '../patients/geo'
 import { statisticsApi } from './api'
 import type { GeoDistributionItem, GeographicStatistics } from './types'
 
@@ -37,7 +38,15 @@ function formatPercent(count: number, total: number): string {
  * un arco por categoría, dibujado con `strokeDasharray`/`strokeDashoffset`
  * sobre la circunferencia. Nunca hay click-through hacia un listado de
  * pacientes — solo lectura. */
-function RegionDonut({ items }: { items: GeoDistributionItem[] }) {
+function RegionDonut({
+  items,
+  selectedRegion,
+  onSelectRegion,
+}: {
+  items: GeoDistributionItem[]
+  selectedRegion: string | null
+  onSelectRegion: (region: string | null) => void
+}) {
   const total = items.reduce((sum, item) => sum + item.count, 0)
   if (total === 0) {
     return <p className="text-sm text-muted-foreground">Sin datos de región para mostrar.</p>
@@ -90,22 +99,35 @@ function RegionDonut({ items }: { items: GeoDistributionItem[] }) {
         </text>
       </svg>
 
-      <ul className="flex flex-1 flex-col gap-2">
-        {items.map((item, index) => (
-          <li key={item.label} className="flex items-center justify-between gap-3 text-sm">
-            <span className="flex items-center gap-2">
-              <span
-                className="h-3 w-3 shrink-0 rounded-full"
-                style={{ backgroundColor: colorFor(item, index) }}
-                aria-hidden="true"
-              />
-              <span className="text-foreground">{item.label}</span>
-            </span>
-            <span className="shrink-0 text-muted-foreground">
-              {item.count} · {formatPercent(item.count, total)}
-            </span>
-          </li>
-        ))}
+      <ul className="flex max-h-72 flex-1 flex-col gap-1 overflow-y-auto pr-1">
+        {items.map((item, index) => {
+          const isRegion = item.label !== OTHER_LABEL
+          const isSelected = selectedRegion === item.label
+          return (
+            <li key={item.label}>
+              <button
+                type="button"
+                disabled={!isRegion}
+                onClick={() => onSelectRegion(isSelected ? null : item.label)}
+                className={`flex w-full items-center justify-between gap-3 rounded-md px-1.5 py-1 text-left text-sm transition-colors ${
+                  isRegion ? 'cursor-pointer hover:bg-accent-soft' : 'cursor-default'
+                } ${isSelected ? 'bg-accent-soft' : ''}`}
+              >
+                <span className="flex items-center gap-2">
+                  <span
+                    className="h-3 w-3 shrink-0 rounded-full"
+                    style={{ backgroundColor: colorFor(item, index) }}
+                    aria-hidden="true"
+                  />
+                  <span className="text-foreground">{item.label}</span>
+                </span>
+                <span className="shrink-0 text-muted-foreground">
+                  {item.count} · {formatPercent(item.count, total)}
+                </span>
+              </button>
+            </li>
+          )
+        })}
       </ul>
     </div>
   )
@@ -120,7 +142,7 @@ function CommuneBars({ items }: { items: GeoDistributionItem[] }) {
   const max = Math.max(...items.map((item) => item.count))
 
   return (
-    <ul className="flex flex-col gap-3">
+    <ul className="flex max-h-96 flex-col gap-3 overflow-y-auto pr-1">
       {items.map((item, index) => (
         <li key={item.label} className="flex flex-col gap-1">
           <div className="flex items-center justify-between text-sm">
@@ -152,11 +174,13 @@ export function StatisticsScreen() {
   const [filter, setFilter] = useState<Filter>('active')
   const [stats, setStats] = useState<GeographicStatistics | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [selectedRegion, setSelectedRegion] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     setStats(null)
     setError(null)
+    setSelectedRegion(null)
     statisticsApi
       .geographic(filter === 'all')
       .then((result) => {
@@ -169,6 +193,9 @@ export function StatisticsScreen() {
       cancelled = true
     }
   }, [filter])
+
+  const communesInSelectedRegion = useMemo(() => (selectedRegion ? new Set(communesForRegion(selectedRegion)) : null), [selectedRegion])
+  const visibleCommunes = stats ? (communesInSelectedRegion ? stats.byCommune.filter((c) => communesInSelectedRegion.has(c.label)) : stats.byCommune) : []
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-10">
@@ -207,23 +234,33 @@ export function StatisticsScreen() {
           </div>
 
           <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-              Distribución por región
-            </h2>
-            <RegionDonut items={stats.byRegion} />
+            <div className="flex items-center justify-between gap-4">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                Distribución por región
+              </h2>
+              <span className="text-xs text-muted-foreground">Todas las regiones registradas · haz clic para ver sus comunas</span>
+            </div>
+            <RegionDonut items={stats.byRegion} selectedRegion={selectedRegion} onSelectRegion={setSelectedRegion} />
+            <p className="text-xs text-muted-foreground">Porcentajes calculados sobre los {stats.withLocation} pacientes con ubicación registrada.</p>
           </section>
 
           <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-              Distribución por comuna
-            </h2>
-            <CommuneBars items={stats.byCommune} />
+            <div className="flex items-center justify-between gap-4">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                Distribución por comuna{selectedRegion ? ` — ${selectedRegion}` : ''}
+              </h2>
+              {selectedRegion && (
+                <button type="button" onClick={() => setSelectedRegion(null)} className="text-xs text-accent hover:underline">
+                  Ver todas las comunas
+                </button>
+              )}
+            </div>
+            <CommuneBars items={visibleCommunes} />
+            <p className="text-xs text-muted-foreground">
+              Todas las comunas registradas, incluso con un solo paciente. Porcentajes calculados sobre{' '}
+              {selectedRegion ? `los pacientes de ${selectedRegion} con comuna registrada` : 'el total de pacientes con comuna registrada'}.
+            </p>
           </section>
-
-          <p className="text-xs text-muted-foreground">
-            Las categorías con menos de 3 pacientes se agrupan en «{OTHER_LABEL}» para que ninguna persona sea
-            identificable a partir de un gráfico.
-          </p>
         </>
       )}
     </div>

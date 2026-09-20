@@ -94,15 +94,19 @@ pub fn restore_patient(id: String, state: State<'_, SharedVaultSession>) -> Resu
 /// Estadísticas geográficas agregadas (Fase 6.1) para la pantalla
 /// "Estadísticas". `include_archived = false` (por defecto en el frontend)
 /// muestra solo pacientes activos; `true` incluye también los archivados.
-/// La respuesta nunca contiene datos de un paciente individual — ver
+/// `suppress_small_categories = false` (lo que usa hoy la pantalla privada
+/// "Estadísticas") muestra cada región/comuna tal cual, sin agrupar ninguna
+/// en "Otras" — ver `services::patients::geographic_statistics`. La
+/// respuesta nunca contiene datos de un paciente individual — ver
 /// `services::patients::GeographicStatistics`.
 #[tauri::command]
 pub fn get_geographic_statistics(
     include_archived: bool,
+    suppress_small_categories: bool,
     state: State<'_, SharedVaultSession>,
 ) -> Result<GeographicStatistics, String> {
     state
-        .with_connection(|conn| patients::geographic_statistics(conn, include_archived))
+        .with_connection(|conn| patients::geographic_statistics(conn, include_archived, suppress_small_categories))
         .map_err(|_| LOCKED_MESSAGE.to_string())?
         .map_err(|e| e.to_string())
 }

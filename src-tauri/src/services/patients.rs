@@ -458,17 +458,39 @@ fn group_small_categories(rows: Vec<patients::GeoCount>) -> Vec<GeoDistributionI
     result
 }
 
+/// Misma cantidad y orden que `group_small_categories`, pero sin fusionar
+/// ninguna categoría pequeña en `"Otras"` — cada región/comuna registrada se
+/// muestra tal cual, incluso con un solo paciente. Pensada para la pantalla
+/// "Estadísticas" (uso privado, local, solo la psicóloga tratante ve sus
+/// propios pacientes): la supresión de categorías pequeñas existe para
+/// proteger de identificación indirecta en un informe/exportación
+/// *compartible* con terceros (ver `group_small_categories`), no tiene
+/// sentido en una pantalla que nadie más que la propia clínica puede ver.
+fn list_all_categories(rows: Vec<patients::GeoCount>) -> Vec<GeoDistributionItem> {
+    let mut result: Vec<GeoDistributionItem> = rows.into_iter().map(|row| GeoDistributionItem { label: row.label, count: row.count }).collect();
+    result.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
+    result
+}
+
 /// `include_archived = false` → solo pacientes activos (no eliminados);
 /// `true` → todos, incluidos los archivados. La agregación real (`GROUP BY`)
 /// ocurre en `repositories::patients::geographic_distribution`, nunca aquí
 /// contando una lista completa de pacientes traída a memoria.
-pub fn geographic_statistics(conn: &Connection, include_archived: bool) -> Result<GeographicStatistics, PatientError> {
+///
+/// `suppress_small_categories`: `true` aplica `group_small_categories` (la
+/// protección de identificación indirecta pensada para un futuro informe
+/// compartible); `false` (lo que usa hoy la pantalla "Estadísticas", de uso
+/// privado) devuelve cada categoría tal cual, sin agrupar ninguna en
+/// `"Otras"`. La función de agrupación (`group_small_categories`) no se
+/// elimina: sigue disponible para cuando exista esa exportación.
+pub fn geographic_statistics(conn: &Connection, include_archived: bool, suppress_small_categories: bool) -> Result<GeographicStatistics, PatientError> {
     let raw = patients::geographic_distribution(conn, include_archived)?;
+    let group = if suppress_small_categories { group_small_categories } else { list_all_categories };
     Ok(GeographicStatistics {
         with_location: raw.with_location,
         without_location: raw.without_location,
-        by_region: group_small_categories(raw.by_region),
-        by_commune: group_small_categories(raw.by_commune),
+        by_region: group(raw.by_region),
+        by_commune: group(raw.by_commune),
     })
 }
 
@@ -951,7 +973,7 @@ mod tests {
         create_patient_in(&conn, "Carla Muñoz", "Región de Valparaíso", "Quillota");
         create_patient(&conn, minimal_input("Diego Ruiz")).unwrap();
 
-        let stats = geographic_statistics(&conn, false).unwrap();
+        let stats = geographic_statistics(&conn, false, false).unwrap();
         assert_eq!(stats.with_location, 3);
         assert_eq!(stats.without_location, 1);
     }
@@ -967,7 +989,7 @@ mod tests {
         create_patient_in(&conn, "P4", "Región de Valparaíso", "Viña del Mar");
         create_patient_in(&conn, "P5", "Región de Valparaíso", "Viña del Mar");
 
-        let stats = geographic_statistics(&conn, false).unwrap();
+        let stats = geographic_statistics(&conn, false, true).unwrap();
 
         // Por región: los 5 pacientes están en la misma región (5 >= 3), no
         // se agrupa.
@@ -993,12 +1015,43 @@ mod tests {
         create_patient_in(&conn, "P4", "Región del Biobío", "Concepción");
         create_patient_in(&conn, "P5", "Región del Biobío", "Concepción");
 
-        let stats = geographic_statistics(&conn, false).unwrap();
+        let stats = geographic_statistics(&conn, false, true).unwrap();
 
         let nuble = stats.by_region.iter().find(|r| r.label == "Otras");
         assert_eq!(nuble.map(|r| r.count), Some(2), "Ñuble con 2 pacientes debe caer en Otras");
         let biobio = stats.by_region.iter().find(|r| r.label == "Región del Biobío");
         assert_eq!(biobio.map(|r| r.count), Some(3), "Biobío con 3 pacientes no debe agruparse");
+    }
+
+    #[test]
+    fn suppress_small_categories_false_shows_every_category_even_with_a_single_patient() {
+        let conn = test_conn("geo-stats-no-suppression");
+        create_patient_in(&conn, "P1", "Región de Valparaíso", "Quillota");
+        create_patient_in(&conn, "P2", "Región de Valparaíso", "Quillota");
+        create_patient_in(&conn, "P3", "Región de Valparaíso", "Viña del Mar");
+        create_patient_in(&conn, "P4", "Región de Ñuble", "Chillán");
+
+        let stats = geographic_statistics(&conn, false, false).unwrap();
+
+        // Ninguna categoría debe fusionarse en "Otras", ni siquiera Viña del
+        // Mar (1 paciente) o Región de Ñuble (1 paciente).
+        assert!(stats.by_region.iter().all(|r| r.label != "Otras"));
+        assert!(stats.by_commune.iter().all(|c| c.label != "Otras"));
+        assert_eq!(
+            stats.by_commune,
+            vec![
+                GeoDistributionItem { label: "Quillota".to_string(), count: 2 },
+                GeoDistributionItem { label: "Chillán".to_string(), count: 1 },
+                GeoDistributionItem { label: "Viña del Mar".to_string(), count: 1 },
+            ]
+        );
+        assert_eq!(
+            stats.by_region,
+            vec![
+                GeoDistributionItem { label: "Región de Valparaíso".to_string(), count: 3 },
+                GeoDistributionItem { label: "Región de Ñuble".to_string(), count: 1 },
+            ]
+        );
     }
 
     #[test]
@@ -1009,10 +1062,10 @@ mod tests {
         create_patient_in(&conn, "P3", "Región de Valparaíso", "Quillota");
         archive_patient(&conn, &a.id).unwrap();
 
-        let active_only = geographic_statistics(&conn, false).unwrap();
+        let active_only = geographic_statistics(&conn, false, false).unwrap();
         assert_eq!(active_only.with_location, 2);
 
-        let including_archived = geographic_statistics(&conn, true).unwrap();
+        let including_archived = geographic_statistics(&conn, true, false).unwrap();
         assert_eq!(including_archived.with_location, 3);
     }
 
@@ -1029,7 +1082,7 @@ mod tests {
     #[test]
     fn geographic_statistics_with_no_patients_returns_empty_distributions() {
         let conn = test_conn("geo-stats-empty");
-        let stats = geographic_statistics(&conn, false).unwrap();
+        let stats = geographic_statistics(&conn, false, false).unwrap();
         assert_eq!(stats.with_location, 0);
         assert_eq!(stats.without_location, 0);
         assert!(stats.by_region.is_empty());
