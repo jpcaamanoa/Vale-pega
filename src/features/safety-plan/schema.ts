@@ -14,11 +14,15 @@ export const safetyPlanFormSchema = z.object({
 export type SafetyPlanFormValues = z.infer<typeof safetyPlanFormSchema>
 
 export const safetyPlanContactFormSchema = z.object({
-  contactType: z.enum(['support_person', 'professional', 'service']),
+  contactType: z.enum(['support_person', 'professional', 'service', 'distraction_person', 'help_contact']),
   name: z.string().min(1, 'El contacto necesita un nombre.'),
   relationshipOrRole: z.string().optional(),
   phone: z.string().optional(),
   notes: z.string().optional(),
+  address: z.string().optional(),
+  servicePhone: z.string().optional(),
+  isEmergencyContact: z.boolean().optional(),
+  isCrisisService: z.boolean().optional(),
 })
 
 export type SafetyPlanContactFormValues = z.infer<typeof safetyPlanContactFormSchema>

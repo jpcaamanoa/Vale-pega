@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { SafetyPlan, SafetyPlanContact, SafetyPlanContactInput, SafetyPlanInput, SafetyPlanSummary } from './types'
+import type { SafetyPlan, SafetyPlanContact, SafetyPlanContactInput, SafetyPlanInput, SafetyPlanListItem, SafetyPlanListItemInput, SafetyPlanSummary } from './types'
 
 export const safetyPlanApi = {
   /** `null` si el paciente todavía no tiene un plan de seguridad vigente. */
@@ -37,4 +37,13 @@ export const safetyPlanApi = {
   updateContact: (contactId: string, input: SafetyPlanContactInput) => invoke<SafetyPlanContact>('update_safety_plan_contact', { contactId, input }),
 
   deleteContact: (contactId: string) => invoke<void>('delete_safety_plan_contact', { contactId }),
+
+  /** Ítems de los Pasos 1/2/3-lugares (señales, estrategias, lugares de distracción) — nunca un solo textarea. */
+  listItems: (planId: string) => invoke<SafetyPlanListItem[]>('list_safety_plan_items', { planId }),
+
+  addItem: (planId: string, input: SafetyPlanListItemInput) => invoke<SafetyPlanListItem>('add_safety_plan_item', { planId, input }),
+
+  updateItem: (itemId: string, content: string) => invoke<SafetyPlanListItem>('update_safety_plan_item', { itemId, content }),
+
+  deleteItem: (itemId: string) => invoke<void>('delete_safety_plan_item', { itemId }),
 }
