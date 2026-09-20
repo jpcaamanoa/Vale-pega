@@ -373,3 +373,65 @@ libres. **Migración forward-only `SCHEMA_V11`**, sin pérdida de datos:
   aplicación, la creación de un vault desechable y la navegación básica. La validación GUI completa
   de esta pantalla (crear/editar cada paso, confirmar, ver historial) queda pendiente para el
   checklist de validación manual en Windows.
+
+## 21. BUG WIN-DB-01 (validación real Windows) — causa raíz y corrección
+
+La validación manual real en Windows sobre un vault **preexistente** (creado antes de `V11`/`V12`,
+actualizado a un binario con HEAD `2dbdbcb`) encontró que los Pasos 1–5 fallaban: "error interno al
+acceder a la base de datos" (Pasos 1/2/3-lugares) o quedaban en "Cargando…" indefinidamente (Pasos
+3-personas/4/5). El Paso 6 (campo narrativo `means_safety`, sin cambios desde `V6`) funcionaba.
+
+**Causa raíz demostrada** (no una hipótesis parcheada): `security::vault_manager::unlock_vault` y
+`security::vault_manager::recover_access` — las dos únicas funciones que abren un vault **ya
+existente** en el flujo real de la aplicación (desbloqueo por contraseña y recuperación por
+código) — abrían la conexión SQLCipher (`db::open_vault`) pero **nunca llamaban a
+`db::run_migrations`**. Solo `PendingVaultCreation::finalize` (usada exclusivamente al crear un
+vault **nuevo**) migraba el esquema. Consecuencia: un vault creado bajo un esquema anterior (por
+ejemplo `V10`) quedaba congelado en ese `PRAGMA user_version` para siempre en cada desbloqueo
+normal — sin importar cuántas veces se actualizara el binario — porque nunca se disparaba ningún
+camino de código que lo llevara al esquema más reciente. `safety_plan_list_items` directamente no
+existía en ese vault, y `safety_plan_contacts` no tenía las columnas nuevas (`address`,
+`service_phone`, `is_emergency_contact`, `is_crisis_service`) — de ahí el "no such table"/"no such
+column" real detrás del mensaje genérico "error interno al acceder a la base de datos".
+
+Esto es un bug **estructural, preexistente desde `SCHEMA_V2`** (la primera migración aditiva
+posterior a `V1`, Fase 6.1) — nunca antes detectado porque, hasta esta fase, cada validación manual
+del proyecto usó un **vault desechable recién creado** bajo el binario ya actualizado (`finalize`
+sí migra), nunca un vault genuinamente preexistente reabierto bajo un binario más nuevo. Es también
+la causa raíz de BUG WIN-DB-02 (ver `docs/library.md` §12) — el mismo defecto, no dos defectos
+independientes.
+
+**Por qué los 841 tests anteriores no lo detectaron**: todo helper de test de este proyecto
+(`test_conn`, `migrated_vault`, etc.) llama a `open_vault` seguido **directamente** de
+`run_migrations` — nunca ejercitan `vault_manager::unlock_vault`/`recover_access`, las funciones
+que realmente usa la aplicación para reabrir un vault existente. Los tests de migración
+(`v11_migration_preserves_existing_safety_plan_contacts_and_widens_contact_type`, etc.) confirmaban
+que el SQL de la migración en sí era correcto y preservaba datos, pero nunca confirmaban que ese
+SQL llegara a **ejecutarse** en el punto real del ciclo de vida de la aplicación donde debía
+ejecutarse.
+
+**Corrección**: `unlock_vault` y `recover_access` ahora llaman a `db::run_migrations` inmediatamente
+después de `open_vault`, antes de devolver la conexión — mismo contrato ya usado por `finalize`
+(`to_latest` es no-op barato si el esquema ya está al día, que es el caso de la inmensa mayoría de
+los desbloqueos reales). Ningún cambio de esquema, ninguna migración destructiva, ningún
+`PRAGMA user_version` que retroceda — únicamente se garantiza que el mecanismo de migración ya
+existente y ya probado se invoque también en desbloqueo/recuperación, no solo en creación. Nuevas
+variantes de error `UnlockError::MigrationFailed`/`RecoveryError::MigrationFailed` (mensaje
+genérico, sin detalle SQL) para el caso — hasta ahora inalcanzable en la práctica — de que la
+migración falle sobre un vault ya autenticado.
+
+**Test de regresión** (`security::vault_manager::tests`,
+`unlock_vault_upgrades_an_existing_v10_vault_and_makes_its_data_reachable` y
+`recover_access_also_upgrades_an_existing_v10_vault`): reproduce el caso real completo —
+`PendingVaultCreation` + `vault.meta.json` real, esquema detenido manualmente en `V10`
+(`db::migrate_to_v10_for_tests`, solo para tests) con un paciente, un plan de seguridad vigente y un
+contacto `support_person` ya guardados con datos ficticios, conexión cerrada (imita cerrar la app),
+y luego **la función real** `unlock_vault`/`recover_access` — nunca `run_migrations` a mano. Verifica
+que el esquema queda en `V12` y que `services::safety_plans::list_items`/`list_contacts` (las
+mismas funciones detrás de los comandos Tauri que Windows reportó rotos) funcionan sobre esa misma
+conexión sin error.
+
+**Riesgo residual**: ninguno identificado sobre la integridad de datos — la corrección no cambia
+qué migraciones existen ni qué hacen, solo asegura que se ejecuten. Queda pendiente la validación
+manual real en Windows sobre el mismo vault preexistente que originó el reporte (ver checklist en
+el informe de cierre de esta fase) antes de considerar el hallazgo cerrado.

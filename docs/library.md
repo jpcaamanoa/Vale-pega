@@ -130,3 +130,35 @@ backup/restore dedicados a Biblioteca. Suite completa: 841/841, `cargo clippy` l
   lo justifica.
 - No hay versión de "subir un archivo nuevo" para un recurso ya existente — el archivo, igual que
   en Documentos, es inmutable una vez creado el recurso.
+
+## 12. BUG WIN-DB-02 (validación real Windows) — causa raíz y corrección
+
+La validación manual real en Windows sobre un vault **preexistente** (creado antes de `SCHEMA_V12`)
+encontró que la Biblioteca global funcionaba parcialmente (listar, buscar, agregar, adjuntar un
+archivo ficticio) pero la sección "Biblioteca" de la ficha de un paciente mostraba "error interno al
+acceder a la base de datos" y luego quedaba en "Cargando…"; "Asociar un recurso existente" aceptaba
+texto pero nunca completaba la asociación.
+
+**Causa raíz demostrada — la misma que BUG WIN-DB-01** (ver `docs/safety-plan.md` §21): el flujo
+real de desbloqueo de un vault existente (`security::vault_manager::unlock_vault`/`recover_access`)
+nunca ejecutaba `db::run_migrations`, así que un vault creado antes de `SCHEMA_V12` nunca llegaba a
+tener la tabla `library_resource_patients`. La Biblioteca **global** seguía funcionando porque
+`library_resources` existe desde `SCHEMA_V1` — nunca dependió de la migración faltante. La
+asociación **por paciente** sí depende exclusivamente de `library_resource_patients` (`SCHEMA_V12`),
+de ahí que fuera precisamente esa parte, y solo esa parte, la que fallaba con "no such table:
+library_resource_patients" detrás del mensaje genérico.
+
+**Corrección**: la misma de WIN-DB-01 — `unlock_vault`/`recover_access` ahora corren
+`db::run_migrations` antes de devolver la conexión. No hay ningún cambio de esquema ni ninguna
+migración nueva específica de Biblioteca: `SCHEMA_V12` ya era correcta, simplemente nunca llegaba a
+ejecutarse sobre un vault reabierto.
+
+**Test de regresión**: `security::vault_manager::tests::unlock_vault_upgrades_an_existing_v10_vault_and_makes_its_data_reachable`
+reproduce el caso real completo (vault `V10` con un paciente y un recurso de Biblioteca ya
+existentes, cerrado y reabierto vía la función real `unlock_vault`) y verifica que
+`services::library::link_resource_to_patient`/`list_resources_for_patient` funcionan sobre esa misma
+conexión — ver el detalle completo en `docs/safety-plan.md` §21 (mismo test cubre ambos bugs, porque
+es la misma causa raíz).
+
+**Riesgo residual**: ninguno sobre integridad de datos. Queda pendiente la validación manual real en
+Windows sobre el vault preexistente que originó el reporte.
