@@ -62,8 +62,8 @@ function CreateFormulationModal({ patientId, episodeId, onCreated, onCancel }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-foreground/40 px-4 py-8">
-      <div className="w-full max-w-2xl rounded-2xl bg-surface-elevated p-6 shadow-lg">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/40 px-4 py-8">
+      <div className="my-auto max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-surface-elevated p-6 shadow-lg">
         <h2 className="mb-2 text-base font-semibold text-foreground">Nueva formulación</h2>
         <p className="mb-4 text-sm text-muted-foreground">
           Una hipótesis clínica de trabajo escrita por ti, que puede cambiar con nueva información. Ninguna sección es obligatoria.
@@ -112,8 +112,8 @@ function UpdateFormulationModal({ formulationId, currentVersion, onUpdated, onCa
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-foreground/40 px-4 py-8">
-      <div className="w-full max-w-2xl rounded-2xl bg-surface-elevated p-6 shadow-lg">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/40 px-4 py-8">
+      <div className="my-auto max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-surface-elevated p-6 shadow-lg">
         <h2 className="mb-2 text-base font-semibold text-foreground">Actualizar formulación</h2>
         <p className="mb-4 text-sm text-muted-foreground">
           Se precargó el contenido de la versión {currentVersion.versionNumber}. Guardar crea la versión {currentVersion.versionNumber + 1} — la anterior queda intacta en el historial.
