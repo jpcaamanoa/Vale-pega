@@ -40,6 +40,12 @@ export function SettingsScreen() {
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
 
+  // FASE 4C: la vista simple es la primera impresión — nunca una pantalla de desarrollador. El
+  // Client ID/Client Secret de Google Cloud Console queda detrás de "Configuración avanzada",
+  // cerrada por defecto. No cambia en absoluto el modelo OAuth (cada profesional sigue trayendo
+  // su propio cliente): esto es solo una reorganización de qué se ve primero.
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
   const loadStatus = () => {
     googleCalendarApi
       .status()
@@ -143,10 +149,10 @@ export function SettingsScreen() {
       <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
         <div>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Google Calendar</h2>
+          <p className="mt-1 text-sm font-medium text-foreground">{status?.connected ? 'Conectado' : 'No conectado'}</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Sincronización unidireccional: las citas creadas en Cuaderno Clínico se reflejan en un calendario de
-            Google ya existente. Solo se envía el horario — nunca el nombre del paciente, diagnóstico, ni ningún
-            otro dato clínico.
+            Las citas creadas en Cuaderno Clínico pueden reflejarse en Google Calendar. Solo se sincroniza el
+            horario; nunca el nombre del paciente, diagnóstico ni otra información clínica.
           </p>
         </div>
 
@@ -154,99 +160,117 @@ export function SettingsScreen() {
 
         {status && (
           <div className="flex flex-col gap-4">
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              <StatusBadge label="Credenciales" ok={status.credentialsConfigured} />
-              <StatusBadge label="Conexión" ok={status.connected} />
-              {status.connected && <StatusBadge label="Calendario seleccionado" ok={status.calendarId !== null} />}
-            </div>
+            {!status.connected && (
+              <div className="flex flex-col gap-2">
+                {status.credentialsConfigured ? (
+                  <Button onClick={handleConnect} disabled={connecting}>
+                    {connecting ? 'Esperando autorización…' : 'Conectar Google Calendar'}
+                  </Button>
+                ) : (
+                  <>
+                    <Button onClick={() => setShowAdvanced(true)}>Conectar Google Calendar</Button>
+                    <p className="text-xs text-muted-foreground">
+                      1. Configurar credenciales una sola vez. 2. Conectar tu cuenta de Google. 3. Elegir el
+                      calendario, si corresponde. El primer paso queda en "Configuración avanzada" más abajo.
+                    </p>
+                  </>
+                )}
+                {connectError && <p className="text-sm text-danger">{connectError}</p>}
+              </div>
+            )}
 
-            <div className="border-t border-border pt-4">
-              <h3 className="mb-2 text-sm font-medium text-foreground">1. Cliente OAuth de Google Cloud Console</h3>
-              <p className="mb-3 text-xs text-muted-foreground">
-                Crea un cliente OAuth de tipo "Aplicación de escritorio" en Google Cloud Console y pega aquí su
-                Client ID y Client Secret. Se guardan cifrados dentro del vault — nunca se vuelven a mostrar en
-                pantalla.
-              </p>
-              <form onSubmit={handleSaveCredentials} className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                <div className="flex-1">
-                  <TextField
-                    label="Client ID"
-                    value={clientId}
-                    onChange={(e) => setClientId(e.target.value)}
-                    placeholder={status.credentialsConfigured ? 'Ya configurado' : 'xxxxx.apps.googleusercontent.com'}
-                  />
-                </div>
-                <div className="flex-1">
-                  <TextField
-                    label="Client Secret"
-                    type="password"
-                    value={clientSecret}
-                    onChange={(e) => setClientSecret(e.target.value)}
-                    placeholder={status.credentialsConfigured ? 'Ya configurado' : 'GOCSPX-…'}
-                  />
-                </div>
-                <Button type="submit" variant="secondary" disabled={savingCredentials || !clientId || !clientSecret}>
-                  {savingCredentials ? 'Guardando…' : 'Guardar'}
-                </Button>
-              </form>
-              {credentialsError && <p className="mt-2 text-sm text-danger">{credentialsError}</p>}
-              {credentialsSaved && <p className="mt-2 text-sm text-success">Credenciales guardadas.</p>}
-            </div>
-
-            <div className="border-t border-border pt-4">
-              <h3 className="mb-2 text-sm font-medium text-foreground">2. Conexión</h3>
-              {status.connected ? (
+            {status.connected && (
+              <div className="flex flex-col gap-4">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm text-muted-foreground">Conectado a tu cuenta de Google.</p>
                   <Button variant="secondary" onClick={() => setConfirmingDisconnect(true)}>
                     Desconectar
                   </Button>
                 </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  <p className="text-sm text-muted-foreground">
-                    Se abrirá tu navegador para iniciar sesión en Google y autorizar el acceso.
+                {connectError && <p className="text-sm text-danger">{connectError}</p>}
+
+                <div>
+                  <h3 className="mb-2 text-sm font-medium text-foreground">Calendario</h3>
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    Elige un calendario ya existente en tu cuenta de Google. Cuaderno Clínico nunca crea un
+                    calendario nuevo.
                   </p>
-                  <Button onClick={handleConnect} disabled={connecting || !status.credentialsConfigured}>
-                    {connecting ? 'Esperando autorización…' : 'Conectar con Google'}
-                  </Button>
-                  {!status.credentialsConfigured && (
-                    <p className="text-xs text-muted-foreground">Primero guarda el Client ID y Client Secret.</p>
+                  {loadingCalendars && <p className="text-sm text-muted-foreground">Cargando calendarios…</p>}
+                  {calendarsError && <p className="text-sm text-danger">{calendarsError}</p>}
+                  {calendars && (
+                    <Select
+                      label="Calendario"
+                      value={status.calendarId ?? ''}
+                      disabled={selectingCalendar}
+                      onChange={(e) => handleSelectCalendar(e.target.value)}
+                    >
+                      <option value="" disabled>
+                        Selecciona un calendario…
+                      </option>
+                      {calendars.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.summary}
+                          {c.primary ? ' (principal)' : ''}
+                        </option>
+                      ))}
+                    </Select>
                   )}
                 </div>
-              )}
-              {connectError && <p className="mt-2 text-sm text-danger">{connectError}</p>}
-            </div>
-
-            {status.connected && (
-              <div className="border-t border-border pt-4">
-                <h3 className="mb-2 text-sm font-medium text-foreground">3. Calendario</h3>
-                <p className="mb-3 text-xs text-muted-foreground">
-                  Elige un calendario ya existente en tu cuenta de Google. Cuaderno Clínico nunca crea un calendario
-                  nuevo.
-                </p>
-                {loadingCalendars && <p className="text-sm text-muted-foreground">Cargando calendarios…</p>}
-                {calendarsError && <p className="text-sm text-danger">{calendarsError}</p>}
-                {calendars && (
-                  <Select
-                    label="Calendario"
-                    value={status.calendarId ?? ''}
-                    disabled={selectingCalendar}
-                    onChange={(e) => handleSelectCalendar(e.target.value)}
-                  >
-                    <option value="" disabled>
-                      Selecciona un calendario…
-                    </option>
-                    {calendars.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.summary}
-                        {c.primary ? ' (principal)' : ''}
-                      </option>
-                    ))}
-                  </Select>
-                )}
               </div>
             )}
+
+            <div className="border-t border-border pt-4">
+              <button
+                type="button"
+                className="text-sm font-medium text-accent hover:underline"
+                onClick={() => setShowAdvanced((v) => !v)}
+              >
+                {showAdvanced ? 'Ocultar configuración avanzada' : 'Configuración avanzada'}
+              </button>
+
+              {showAdvanced && (
+                <div className="mt-4 flex flex-col gap-4">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <StatusBadge label="Credenciales" ok={status.credentialsConfigured} />
+                    <StatusBadge label="Conexión" ok={status.connected} />
+                    {status.connected && <StatusBadge label="Calendario seleccionado" ok={status.calendarId !== null} />}
+                  </div>
+
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-foreground">Cliente OAuth de Google Cloud Console</h3>
+                    <p className="mb-3 text-xs text-muted-foreground">
+                      Crea un cliente OAuth de tipo "Aplicación de escritorio" en Google Cloud Console y pega aquí su
+                      Client ID y Client Secret. Se guardan cifrados dentro del vault — nunca se vuelven a mostrar en
+                      pantalla.
+                    </p>
+                    <form onSubmit={handleSaveCredentials} className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                      <div className="flex-1">
+                        <TextField
+                          label="Client ID"
+                          value={clientId}
+                          onChange={(e) => setClientId(e.target.value)}
+                          placeholder={status.credentialsConfigured ? 'Ya configurado' : 'xxxxx.apps.googleusercontent.com'}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <TextField
+                          label="Client Secret"
+                          type="password"
+                          value={clientSecret}
+                          onChange={(e) => setClientSecret(e.target.value)}
+                          placeholder={status.credentialsConfigured ? 'Ya configurado' : 'GOCSPX-…'}
+                        />
+                      </div>
+                      <Button type="submit" variant="secondary" disabled={savingCredentials || !clientId || !clientSecret}>
+                        {savingCredentials ? 'Guardando…' : 'Guardar'}
+                      </Button>
+                    </form>
+                    {credentialsError && <p className="mt-2 text-sm text-danger">{credentialsError}</p>}
+                    {credentialsSaved && <p className="mt-2 text-sm text-success">Credenciales guardadas.</p>}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </section>

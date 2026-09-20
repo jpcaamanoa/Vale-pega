@@ -181,3 +181,32 @@ sesión de Google):
   contra Google real, la renovación de tokens, ni la revocación se hayan probado end-to-end.
 - **Multiplataforma**: todo lo anterior se desarrolló y probó en Linux. El comportamiento en
   macOS/Windows del backend de `keyring` y del listener de loopback no se verificó en esta fase.
+
+## UX simplificada de Ajustes (FASE 4C, autorizada explícitamente)
+
+**Sin ningún cambio al modelo OAuth, a los scopes, ni a cómo se guardan/protegen las credenciales**
+— exclusivamente reorganización de qué se ve primero en `SettingsScreen.tsx`. Antes, la primera
+vista mostraba directamente los campos "Client ID"/"Client Secret" de un cliente OAuth de Google
+Cloud Console — correcto pero demasiado técnico como primera impresión para el perfil de usuaria
+objetivo de esta aplicación.
+
+Ahora la vista simple (siempre visible primero) muestra: el estado en una frase ("No conectado"/
+"Conectado"), una descripción no técnica de qué se sincroniza y qué nunca se envía, y un botón
+principal "Conectar Google Calendar". Si las credenciales todavía no están configuradas, ese mismo
+botón lleva a "Configuración avanzada" en vez de simular una conexión mágica inexistente — junto a
+él se explican los tres pasos reales ("1. Configurar credenciales una sola vez. 2. Conectar tu
+cuenta de Google. 3. Elegir el calendario, si corresponde."), nunca se oculta que el primer paso
+sigue siendo necesario. Una vez conectado, el selector de "Calendario" (Paso 3, contenido
+legítimamente simple, no técnico) se muestra directamente en la vista simple.
+
+"Configuración avanzada" es una sección colapsable, cerrada por defecto, que contiene exactamente
+el mismo formulario de Client ID/Client Secret que ya existía — mismo código, mismas validaciones,
+mismo texto explicativo de cómo crear el cliente OAuth en Google Cloud Console. Sigue siendo
+accesible en cualquier momento (conectado o no) para revisar/actualizar las credenciales.
+
+**Qué se decidió deliberadamente NO hacer** (ver opción C de la auditoría del informe post-Fase
+19): explorar un modelo de credenciales compartidas de la aplicación (un solo cliente OAuth
+registrado una vez por el proyecto, en vez de que cada profesional traiga el suyo) — eso cambiaría
+el modelo de seguridad/confianza actual y requiere una decisión arquitectónica explícita de la
+usuaria antes de evaluarse siquiera, no es una mejora de UX. No se implementó ni se evaluó en esta
+fase.
