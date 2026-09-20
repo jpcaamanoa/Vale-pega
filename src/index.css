@@ -69,3 +69,21 @@
     }
   }
 }
+
+/* CAUSA RAÍZ del leak de privacidad reportado en la validación real de Windows: el
+   "Headers and footers" nativo de Chromium/WebView2 (activado por defecto en el diálogo de
+   impresión) dibuja fecha/hora, `document.title` ("Cuaderno Clínico") y `location.href` — que,
+   por usar HashRouter, incluye la ruta activa completa con el UUID del paciente
+   (`#/patients/<uuid>`) — más el número de página, en el margen de la página impresa. Ninguno de
+   esos textos lo genera nuestro HTML/CSS: es el motor de impresión dibujando sobre el margen
+   físico de la hoja. `@page { margin: 0 }` es la forma estándar (CSS Paged Media, sin ninguna
+   dependencia ni cambio de mecanismo) de eliminar ese margen — sin espacio físico donde dibujar,
+   el header/footer nativo desaparece estructuralmente, nunca se "oculta" un texto puntual. El
+   padding visual del documento impreso lo da `SafetyPlanExportModel`/`SafetyPlanPrintDocument`
+   con su propio `padding` inline, independiente del margen de página. */
+@media print {
+  @page {
+    size: auto;
+    margin: 0;
+  }
+}
