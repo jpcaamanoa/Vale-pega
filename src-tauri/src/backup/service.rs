@@ -408,14 +408,21 @@ pub fn restore_backup(
         }
     }
 
+    // Deliberadamente las variantes SIN migrar (`security::*_without_migrating`,
+    // no `security::unlock_vault`/`security::recover_access` que usa el
+    // desbloqueo real de la app): esta validación necesita leer el
+    // `PRAGMA user_version` crudo del backup, antes de tocar su esquema, para
+    // poder rechazar un backup de una versión más nueva de la app
+    // (`RestoreError::SchemaTooNew`, un poco más abajo) — migrar aquí
+    // primero rompería exactamente esa detección.
     let staged_paths = VaultPaths::new(&staging);
     let mut staged_conn: Connection = match &credential {
-        RestoreCredential::Password(pw) => security::unlock_vault(&staged_paths, pw).map(|(conn, _dek)| conn).map_err(|e| match e {
+        RestoreCredential::Password(pw) => security::unlock_vault_without_migrating(&staged_paths, pw).map(|(conn, _dek)| conn).map_err(|e| match e {
             security::UnlockError::CorruptDatabase => RestoreError::CorruptStagedDatabase,
             _ => RestoreError::IncorrectCredential,
         })?,
         RestoreCredential::RecoveryCode { code, new_password } => {
-            security::recover_access(&staged_paths, code, new_password).map(|(conn, _dek)| conn).map_err(|e| match e {
+            security::recover_access_without_migrating(&staged_paths, code, new_password).map(|(conn, _dek)| conn).map_err(|e| match e {
                 security::RecoveryError::CorruptDatabase => RestoreError::CorruptStagedDatabase,
                 _ => RestoreError::IncorrectCredential,
             })?

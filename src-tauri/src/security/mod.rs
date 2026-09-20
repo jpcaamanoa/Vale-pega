@@ -37,11 +37,19 @@ pub use session::{FileKey, UnwrapFileKeyError, WrapFileKeyError, WrappedFileKey,
 pub use session::KeyWrapVersion;
 
 // Re-exportado únicamente para `backup::service` (Fase 10): validar la
-// contraseña/código de recuperación de un vault en *staging* (una copia
-// restaurada temporal, nunca el vault activo de `VaultSession`) exige
-// llamar exactamente la misma lógica de desenvolvimiento del DEK que ya
-// usa `VaultSession` — nunca una reimplementación paralela. `VaultSession`
-// sigue siendo la única puerta de entrada para el vault *activo*; esto no
-// cambia esa regla, solo permite ejercer la misma lógica pura sobre una
-// ruta de archivo distinta y desechable.
-pub use vault_manager::{recover_access, unlock_vault, RecoveryError, UnlockError, VaultPaths};
+// contraseña de un vault en *staging* (una copia restaurada temporal, nunca
+// el vault activo de `VaultSession`) exige llamar exactamente la misma
+// lógica de desenvolvimiento del DEK que ya usa `VaultSession` — nunca una
+// reimplementación paralela. `VaultSession` sigue siendo la única puerta de
+// entrada para el vault *activo*; esto no cambia esa regla, solo permite
+// ejercer la misma lógica pura sobre una ruta de archivo distinta y
+// desechable. `recover_access` (la variante pública que migra) no se
+// re-exporta aquí: `backup::service` solo necesita `recover_access_without_migrating`
+// (más abajo) para su verificación de staging, y `VaultSession::recover_access`
+// llama a `vault_manager::recover_access` directamente dentro del propio
+// módulo `security`, sin pasar por este re-export.
+pub use vault_manager::{unlock_vault, RecoveryError, UnlockError, VaultPaths};
+/// Uso interno exclusivo de `backup::service::restore_backup` — ver el
+/// comentario de estas funciones en `vault_manager.rs` sobre por qué el
+/// staging de un restore necesita inspeccionar el esquema antes de migrar.
+pub(crate) use vault_manager::{recover_access_without_migrating, unlock_vault_without_migrating};

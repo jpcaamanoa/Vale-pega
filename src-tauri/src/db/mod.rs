@@ -10,3 +10,5 @@ mod test_support;
 
 pub use connection::{open_vault, VaultError, VaultKey, VaultKeyError, VAULT_KEY_LEN};
 pub use migrations::run_migrations;
+#[cfg(test)]
+pub(crate) use migrations::migrate_to_v10_for_tests;

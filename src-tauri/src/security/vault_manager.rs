@@ -122,6 +122,11 @@ pub enum UnlockError {
     /// archivo `.db` no abre. Solo se revela después de probar la
     /// contraseña correcta, así que no ayuda a un atacante sin ella.
     CorruptDatabase,
+    /// La contraseña fue correcta y la base abrió, pero llevarla al esquema
+    /// más reciente falló (ver `causa raíz WIN-DB-01/02` en
+    /// `docs/safety-plan.md`/`docs/library.md`). Nunca se sigue adelante con
+    /// un `Connection` a medio migrar.
+    MigrationFailed,
 }
 impl fmt::Display for UnlockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -132,6 +137,7 @@ impl fmt::Display for UnlockError {
             }
             UnlockError::IncorrectPassword => write!(f, "contraseña incorrecta"),
             UnlockError::CorruptDatabase => write!(f, "la base de datos parece estar dañada"),
+            UnlockError::MigrationFailed => write!(f, "no se pudo actualizar el esquema de la base de datos"),
         }
     }
 }
@@ -170,6 +176,9 @@ pub enum RecoveryError {
     MetaFileUnreadable,
     Io(VaultMetaError),
     CorruptDatabase,
+    /// Mismo caso que `UnlockError::MigrationFailed`, alcanzado desde el
+    /// flujo de recuperación en vez del de desbloqueo normal.
+    MigrationFailed,
 }
 impl fmt::Display for RecoveryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -182,6 +191,7 @@ impl fmt::Display for RecoveryError {
             }
             RecoveryError::Io(e) => write!(f, "no se pudo guardar la nueva contraseña: {e}"),
             RecoveryError::CorruptDatabase => write!(f, "la base de datos parece estar dañada"),
+            RecoveryError::MigrationFailed => write!(f, "no se pudo actualizar el esquema de la base de datos"),
         }
     }
 }
@@ -262,7 +272,17 @@ impl PendingVaultCreation {
 // Desbloqueo
 // ---------------------------------------------------------------------
 
-pub fn unlock_vault(paths: &VaultPaths, password: &str) -> Result<(Connection, VaultKey), UnlockError> {
+/// Autentica y abre la conexión, **sin migrar el esquema**. Uso interno:
+/// `unlock_vault` (más abajo) es el punto de entrada real de la aplicación y
+/// siempre migra a continuación; `backup::service::restore_backup` es la
+/// única otra llamadora, y usa deliberadamente esta variante sin migrar
+/// sobre la base **staged** de un backup — necesita inspeccionar el
+/// `PRAGMA user_version` crudo (sin tocar el esquema todavía) para decidir
+/// si el backup viene de una versión de la app más nueva que esta
+/// instalación (`RestoreError::SchemaTooNew`) **antes** de arriesgarse a
+/// migrar algo que no sabe interpretar — luego migra explícitamente ella
+/// misma, solo si la versión resultó soportada.
+pub(crate) fn unlock_vault_without_migrating(paths: &VaultPaths, password: &str) -> Result<(Connection, VaultKey), UnlockError> {
     if !paths.exists() {
         return Err(UnlockError::NoVault);
     }
@@ -279,6 +299,25 @@ pub fn unlock_vault(paths: &VaultPaths, password: &str) -> Result<(Connection, V
     // autenticación de AES-GCM no puede falsificarse). Cualquier fallo de
     // aquí en adelante es del archivo `.db`, no de la contraseña.
     let conn = db::open_vault(&paths.db_path, &dek).map_err(|_| UnlockError::CorruptDatabase)?;
+    Ok((conn, dek))
+}
+
+/// Punto de entrada real de la aplicación para reabrir un vault existente
+/// (usado por `commands::vault::unlock_vault`, único camino real de
+/// desbloqueo). CAUSA RAÍZ WIN-DB-01/WIN-DB-02 (ver
+/// `docs/safety-plan.md`/`docs/library.md`): `PendingVaultCreation::finalize`
+/// corre las migraciones al crear un vault nuevo, pero un vault YA
+/// EXISTENTE solo pasaba antes por `open_vault` en este punto — nunca por
+/// `run_migrations`. Un vault creado bajo un esquema anterior (p. ej. V10)
+/// quedaba congelado en ese `PRAGMA user_version` para siempre en cada
+/// desbloqueo normal, aunque el binario ya conociera esquemas más nuevos
+/// (V11/V12…): las tablas y columnas nuevas nunca llegaban a crearse.
+/// `to_latest` es un no-op barato cuando el esquema ya está al día (la
+/// mayoría de los desbloqueos reales), y aditivo/preservador de datos
+/// cuando no — mismo contrato que ya usa `finalize` para un vault nuevo.
+pub fn unlock_vault(paths: &VaultPaths, password: &str) -> Result<(Connection, VaultKey), UnlockError> {
+    let (mut conn, dek) = unlock_vault_without_migrating(paths, password)?;
+    db::run_migrations(&mut conn).map_err(|_| UnlockError::MigrationFailed)?;
     Ok((conn, dek))
 }
 
@@ -321,7 +360,11 @@ pub fn change_password(
 // Recuperación de acceso mediante el código de recuperación
 // ---------------------------------------------------------------------
 
-pub fn recover_access(
+/// Mismo motivo que `unlock_vault_without_migrating` — variante sin migrar,
+/// de uso interno exclusivo de `backup::service::restore_backup` para poder
+/// inspeccionar el `PRAGMA user_version` crudo del backup **staged** antes
+/// de decidir si migrarlo.
+pub(crate) fn recover_access_without_migrating(
     paths: &VaultPaths,
     recovery_code_input: &str,
     new_password: &str,
@@ -351,6 +394,19 @@ pub fn recover_access(
     meta.save(&paths.meta_path).map_err(RecoveryError::Io)?;
 
     let conn = db::open_vault(&paths.db_path, &dek).map_err(|_| RecoveryError::CorruptDatabase)?;
+    Ok((conn, dek))
+}
+
+/// Punto de entrada real de la aplicación para recuperar acceso mediante el
+/// código de recuperación. Mismo motivo que `unlock_vault` para migrar
+/// siempre — ver el comentario ahí.
+pub fn recover_access(
+    paths: &VaultPaths,
+    recovery_code_input: &str,
+    new_password: &str,
+) -> Result<(Connection, VaultKey), RecoveryError> {
+    let (mut conn, dek) = recover_access_without_migrating(paths, recovery_code_input, new_password)?;
+    db::run_migrations(&mut conn).map_err(|_| RecoveryError::MigrationFailed)?;
     Ok((conn, dek))
 }
 
@@ -414,6 +470,109 @@ mod tests {
         let paths = VaultPaths::new(&dir);
         let err = unlock_vault(&paths, "cualquiera").unwrap_err();
         assert!(matches!(err, UnlockError::NoVault));
+    }
+
+    /// Regresión WIN-DB-01/WIN-DB-02 (validación real de Windows,
+    /// continuación post-Fase 19): reproduce el flujo real completo — un
+    /// vault creado bajo un esquema anterior (V10, antes de que existieran
+    /// `safety_plan_list_items`/las columnas nuevas de `safety_plan_contacts`/
+    /// `library_resource_patients`), con datos reales ya guardados, abierto
+    /// después por la función de desbloqueo REAL (`unlock_vault`, la misma
+    /// que usa `commands::vault::unlock_vault` en la app) — nunca llamando a
+    /// `run_migrations` directamente, como sí hacían (y siguen haciendo)
+    /// todos los demás tests de este proyecto. Antes del fix, esta prueba
+    /// fallaba exactamente como en Windows: el esquema se quedaba en V10 y
+    /// `list_items`/`list_contacts`/`link_resource_to_patient` fallaban con
+    /// "no such table"/"no such column".
+    #[test]
+    fn unlock_vault_upgrades_an_existing_v10_vault_and_makes_its_data_reachable() {
+        let dir = temp_vault_dir("unlock-migrates-v10");
+        let paths = VaultPaths::new(&dir);
+        let password = "ContrasenaSegura2026!";
+
+        // 1. Construir un vault "real" con el mismo mecanismo de creación
+        //    (`PendingVaultCreation` + `vault.meta.json` real), pero
+        //    deteniendo el esquema en V10 en vez de dejar que `finalize()`
+        //    lo lleve a la última versión — imita exactamente un vault
+        //    creado bajo un binario anterior a V11/V12.
+        let pending = PendingVaultCreation::begin(password).unwrap();
+        pending.meta.save(&paths.meta_path).unwrap();
+        {
+            let mut conn = db::open_vault(&paths.db_path, &pending.dek).unwrap();
+            crate::db::migrate_to_v10_for_tests(&mut conn);
+
+            conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'Paciente Legacy')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO safety_plans (id, patient_id, version, status, confirmed_at) \
+                 VALUES ('sp1', 'p1', 1, 'vigente', '2026-01-01T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name) \
+                 VALUES ('c1', 'sp1', 'support_person', 'Amiga Legacy')",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO library_resources (id, title) VALUES ('r1', 'Guía ficticia')", [])
+                .unwrap();
+
+            let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(schema_version, 10, "el vault de prueba debe quedar exactamente en V10 antes del desbloqueo real");
+        } // la conexión se cierra aquí — imita cerrar y reabrir la app.
+
+        // 2. El flujo real: desbloquear con la contraseña, exactamente como
+        //    hace la UI en cada arranque — nunca `run_migrations` a mano.
+        let (conn, _dek) = unlock_vault(&paths, password).expect("el desbloqueo real debe migrar automáticamente a la última versión");
+
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(schema_version, 12, "unlock_vault debe dejar un vault V10 real en el esquema más reciente");
+
+        // 3. Las funciones que Windows reportó rotas deben funcionar ahora
+        //    sobre esta MISMA conexión — la que unlock_vault realmente
+        //    devuelve, no una conexión de test aparte.
+        use crate::services::{library, safety_plans};
+
+        let items = safety_plans::list_items(&conn, "sp1").expect("Paso 1/2/3-lugares no debe fallar tras el desbloqueo real (WIN-DB-01)");
+        assert!(items.is_empty(), "un plan V10 no tenía ítems de lista — deben leerse vacíos, nunca fallar");
+
+        let contacts = safety_plans::list_contacts(&conn, "sp1").expect("Paso 3-personas/4/5 no debe fallar tras el desbloqueo real (WIN-DB-01)");
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].contact_type, "support_person", "un contacto V10 conserva su contact_type original");
+        assert_eq!(contacts[0].name, "Amiga Legacy");
+
+        library::link_resource_to_patient(&conn, "r1", "p1").expect("asociar Biblioteca<->paciente no debe fallar tras el desbloqueo real (WIN-DB-02)");
+        let linked = library::list_resources_for_patient(&conn, "p1").expect("listar recursos del paciente no debe fallar tras el desbloqueo real (WIN-DB-02)");
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].title, "Guía ficticia");
+    }
+
+    /// Mismo escenario que la anterior, pero pasando por el flujo real de
+    /// recuperación por código en vez del desbloqueo por contraseña — el
+    /// otro punto de entrada que `security::session` expone a un vault
+    /// existente.
+    #[test]
+    fn recover_access_also_upgrades_an_existing_v10_vault() {
+        let dir = temp_vault_dir("recover-migrates-v10");
+        let paths = VaultPaths::new(&dir);
+        let pending = PendingVaultCreation::begin("ContrasenaSegura2026!").unwrap();
+        let recovery_code = pending.recovery_code_display();
+        pending.meta.save(&paths.meta_path).unwrap();
+        {
+            let mut conn = db::open_vault(&paths.db_path, &pending.dek).unwrap();
+            crate::db::migrate_to_v10_for_tests(&mut conn);
+            conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+            conn.execute("INSERT INTO safety_plans (id, patient_id, version, status) VALUES ('sp1', 'p1', 1, 'borrador')", [])
+                .unwrap();
+        }
+
+        let (conn, _dek) = recover_access(&paths, &recovery_code, "NuevaContrasenaSegura2026!").expect("recover_access debe migrar automáticamente igual que unlock_vault");
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(schema_version, 12);
+
+        use crate::services::safety_plans;
+        safety_plans::list_items(&conn, "sp1").expect("no debe fallar tras recover_access sobre un vault V10 real");
     }
 
     #[test]

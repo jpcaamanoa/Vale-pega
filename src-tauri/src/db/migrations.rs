@@ -1258,6 +1258,30 @@ pub fn run_migrations(conn: &mut Connection) -> rusqlite_migration::Result<()> {
     result
 }
 
+/// Solo para tests de otros módulos (p. ej. `security::vault_manager`) que
+/// necesitan reproducir un vault real creado bajo un esquema anterior a
+/// V11/V12 — mismo `Vec` de migraciones que usan ya los tests de este
+/// archivo (`up_to_v10`/`migrated_vault`), expuesto como función en vez de
+/// duplicado en cada módulo que lo necesite.
+#[cfg(test)]
+pub(crate) fn migrate_to_v10_for_tests(conn: &mut Connection) {
+    let up_to_v10 = Migrations::new(vec![
+        M::up(SCHEMA_V1).foreign_key_check(),
+        M::up(SCHEMA_V2).foreign_key_check(),
+        M::up(SCHEMA_V3).foreign_key_check(),
+        M::up(SCHEMA_V4).foreign_key_check(),
+        M::up(SCHEMA_V5).foreign_key_check(),
+        M::up(SCHEMA_V6).foreign_key_check(),
+        M::up(SCHEMA_V7).foreign_key_check(),
+        M::up(SCHEMA_V8).foreign_key_check(),
+        M::up(SCHEMA_V9).foreign_key_check(),
+        M::up(SCHEMA_V10).foreign_key_check(),
+    ]);
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    up_to_v10.to_latest(conn).unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
