@@ -31,12 +31,41 @@ use serde::Deserialize;
 
 use crate::repositories::patients;
 use crate::repositories::safety_plans::{
-    self, NewSafetyPlanContactRow, NewSafetyPlanRow, SafetyPlan, SafetyPlanContact, SafetyPlanContactUpdateRow, SafetyPlanDraftUpdateRow, SafetyPlanSummary,
+    self, NewSafetyPlanContactRow, NewSafetyPlanListItemRow, NewSafetyPlanRow, SafetyPlan, SafetyPlanContact, SafetyPlanContactUpdateRow, SafetyPlanDraftUpdateRow, SafetyPlanListItem,
+    SafetyPlanSummary,
 };
 
 /// Taxonomía cerrada de tipo de contacto — fijada en el `CHECK` de
-/// `SCHEMA_V6`. Cambiarla exige otra migración.
-pub const VALID_CONTACT_TYPES: &[&str] = &["support_person", "professional", "service"];
+/// `SCHEMA_V6`/ampliada en `SCHEMA_V11`. Cambiarla exige otra migración.
+///
+/// `support_person` se conserva únicamente por compatibilidad con
+/// contactos creados antes del rediseño de seis pasos (Fase de
+/// continuación post-Fase 19) — la interfaz nueva ya no lo ofrece como
+/// opción al crear un contacto, solo lo permite seguir leyendo/editando/
+/// eliminando en planes que ya lo tenían. Los seis pasos usan:
+/// `distraction_person` (Paso 3, personas), `professional`/`service`
+/// (Paso 5, sin cambios), `help_contact` (Paso 4).
+pub const VALID_CONTACT_TYPES: &[&str] = &["support_person", "professional", "service", "distraction_person", "help_contact"];
+
+/// Tipos de contacto que la interfaz nueva sigue ofreciendo para crear un
+/// contacto — `support_person` queda fuera a propósito (ver
+/// `VALID_CONTACT_TYPES`).
+pub const CREATABLE_CONTACT_TYPES: &[&str] = &["professional", "service", "distraction_person", "help_contact"];
+
+/// Taxonomía cerrada de `safety_plan_list_items.item_type` — fijada en el
+/// `CHECK` de `SCHEMA_V11`. Cada valor corresponde a una lista agregable de
+/// los seis pasos: `warning_sign` (Paso 1, señales de alerta),
+/// `strategy` (Paso 2, estrategias individuales) y `distraction_place`
+/// (Paso 3, lugares de distracción — las *personas* de ese mismo paso son
+/// contactos `distraction_person`, no ítems de esta lista).
+pub const VALID_ITEM_TYPES: &[&str] = &["warning_sign", "strategy", "distraction_place"];
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafetyPlanListItemInput {
+    pub item_type: String,
+    pub content: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +89,18 @@ pub struct SafetyPlanContactInput {
     pub relationship_or_role: Option<String>,
     pub phone: Option<String>,
     pub notes: Option<String>,
+    /// Solo tienen sentido para `contact_type` IN ('professional','service')
+    /// (Paso 5) — se aceptan igual para cualquier otro tipo (quedan
+    /// simplemente sin usar) en vez de rechazarlos, para no acoplar esta
+    /// validación a una regla de UI que puede cambiar.
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub service_phone: Option<String>,
+    #[serde(default)]
+    pub is_emergency_contact: bool,
+    #[serde(default)]
+    pub is_crisis_service: bool,
 }
 
 #[derive(Debug)]
@@ -74,6 +115,9 @@ pub enum SafetyPlanError {
     ContactNotFound,
     InvalidContactType(String),
     MissingContactName,
+    ItemNotFound,
+    InvalidItemType(String),
+    MissingItemContent,
     Database(rusqlite::Error),
 }
 
@@ -90,6 +134,9 @@ impl fmt::Display for SafetyPlanError {
             SafetyPlanError::ContactNotFound => write!(f, "contacto no encontrado"),
             SafetyPlanError::InvalidContactType(t) => write!(f, "tipo de contacto inválido: '{t}'"),
             SafetyPlanError::MissingContactName => write!(f, "el contacto necesita un nombre"),
+            SafetyPlanError::ItemNotFound => write!(f, "ítem no encontrado"),
+            SafetyPlanError::InvalidItemType(t) => write!(f, "tipo de ítem inválido: '{t}'"),
+            SafetyPlanError::MissingItemContent => write!(f, "el ítem necesita contenido"),
             SafetyPlanError::Database(_) => write!(f, "error interno al acceder a la base de datos"),
         }
     }
@@ -315,7 +362,23 @@ pub fn create_draft_from_current(conn: &Connection, patient_id: &str) -> Result<
                 relationship_or_role: contact.relationship_or_role.as_deref(),
                 phone: contact.phone.as_deref(),
                 notes: contact.notes.as_deref(),
+                address: contact.address.as_deref(),
+                service_phone: contact.service_phone.as_deref(),
+                is_emergency_contact: contact.is_emergency_contact,
+                is_crisis_service: contact.is_crisis_service,
                 sort_order: contact.sort_order,
+            },
+        )?;
+    }
+    for item in safety_plans::list_items_by_plan(&tx, &current.id)? {
+        safety_plans::insert_list_item(
+            &tx,
+            &NewSafetyPlanListItemRow {
+                id: &uuid::Uuid::new_v4().to_string(),
+                safety_plan_id: &new_id,
+                item_type: &item.item_type,
+                content: &item.content,
+                sort_order: item.sort_order,
             },
         )?;
     }
@@ -378,8 +441,8 @@ pub fn list_contacts(conn: &Connection, plan_id: &str) -> Result<Vec<SafetyPlanC
     Ok(safety_plans::list_contacts_by_plan(conn, plan_id)?)
 }
 
-fn validate_contact_input(input: &SafetyPlanContactInput) -> Result<(), SafetyPlanError> {
-    if !VALID_CONTACT_TYPES.contains(&input.contact_type.as_str()) {
+fn validate_contact_input(input: &SafetyPlanContactInput, allowed_types: &[&str]) -> Result<(), SafetyPlanError> {
+    if !allowed_types.contains(&input.contact_type.as_str()) {
         return Err(SafetyPlanError::InvalidContactType(input.contact_type.clone()));
     }
     if input.name.trim().is_empty() {
@@ -390,10 +453,12 @@ fn validate_contact_input(input: &SafetyPlanContactInput) -> Result<(), SafetyPl
 
 /// Solo puede agregarse un contacto a un plan todavía en borrador de un
 /// paciente no archivado — mismo criterio de inmutabilidad/archivado que el
-/// contenido narrativo del propio borrador.
+/// contenido narrativo del propio borrador. Un contacto nuevo solo puede
+/// crearse con uno de `CREATABLE_CONTACT_TYPES` — `support_person` es
+/// exclusivamente de lectura/edición para planes que ya lo tenían.
 pub fn add_contact(conn: &Connection, plan_id: &str, input: SafetyPlanContactInput) -> Result<SafetyPlanContact, SafetyPlanError> {
     require_editable_draft(conn, plan_id)?;
-    validate_contact_input(&input)?;
+    validate_contact_input(&input, CREATABLE_CONTACT_TYPES)?;
 
     let existing = safety_plans::list_contacts_by_plan(conn, plan_id)?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -407,6 +472,10 @@ pub fn add_contact(conn: &Connection, plan_id: &str, input: SafetyPlanContactInp
             relationship_or_role: none_if_blank(input.relationship_or_role).as_deref(),
             phone: none_if_blank(input.phone).as_deref(),
             notes: none_if_blank(input.notes).as_deref(),
+            address: none_if_blank(input.address).as_deref(),
+            service_phone: none_if_blank(input.service_phone).as_deref(),
+            is_emergency_contact: input.is_emergency_contact,
+            is_crisis_service: input.is_crisis_service,
             sort_order: existing.len() as i64,
         },
     )?)
@@ -418,18 +487,29 @@ fn require_contact_on_draft(conn: &Connection, contact_id: &str) -> Result<Safet
     Ok(contact)
 }
 
+/// A diferencia de `add_contact`, valida contra `VALID_CONTACT_TYPES` (no
+/// `CREATABLE_CONTACT_TYPES`): editar un contacto `support_person` creado
+/// antes del rediseño de seis pasos (por ejemplo, solo corregirle el
+/// teléfono) nunca debe bloquearse por un tipo que ya no se ofrece para
+/// contactos nuevos.
 pub fn update_contact(conn: &Connection, contact_id: &str, input: SafetyPlanContactInput) -> Result<SafetyPlanContact, SafetyPlanError> {
     let existing = require_contact_on_draft(conn, contact_id)?;
-    validate_contact_input(&input)?;
+    validate_contact_input(&input, VALID_CONTACT_TYPES)?;
     let relationship_or_role = none_if_blank(input.relationship_or_role);
     let phone = none_if_blank(input.phone);
     let notes = none_if_blank(input.notes);
+    let address = none_if_blank(input.address);
+    let service_phone = none_if_blank(input.service_phone);
     let row = SafetyPlanContactUpdateRow {
         contact_type: &input.contact_type,
         name: input.name.trim(),
         relationship_or_role: relationship_or_role.as_deref(),
         phone: phone.as_deref(),
         notes: notes.as_deref(),
+        address: address.as_deref(),
+        service_phone: service_phone.as_deref(),
+        is_emergency_contact: input.is_emergency_contact,
+        is_crisis_service: input.is_crisis_service,
         sort_order: existing.sort_order,
     };
     safety_plans::update_contact(conn, contact_id, &row)?.ok_or(SafetyPlanError::ContactNotFound)
@@ -438,6 +518,72 @@ pub fn update_contact(conn: &Connection, contact_id: &str, input: SafetyPlanCont
 pub fn delete_contact(conn: &Connection, contact_id: &str) -> Result<(), SafetyPlanError> {
     require_contact_on_draft(conn, contact_id)?;
     safety_plans::delete_contact(conn, contact_id)?;
+    Ok(())
+}
+
+// ---- ítems de lista (Paso 1: señales de alerta, Paso 2: estrategias
+// individuales, Paso 3: lugares de distracción) ----
+
+/// Todos los ítems de un plan, de cualquier tipo. El frontend los separa por
+/// `item_type` para las tres secciones correspondientes — nunca se agregan
+/// como un solo textarea (decisión explícita del rediseño de seis pasos).
+pub fn list_items(conn: &Connection, plan_id: &str) -> Result<Vec<SafetyPlanListItem>, SafetyPlanError> {
+    safety_plans::find_by_id(conn, plan_id)?.ok_or(SafetyPlanError::PlanNotFound)?;
+    Ok(safety_plans::list_items_by_plan(conn, plan_id)?)
+}
+
+fn validate_item_input(input: &SafetyPlanListItemInput) -> Result<(), SafetyPlanError> {
+    if !VALID_ITEM_TYPES.contains(&input.item_type.as_str()) {
+        return Err(SafetyPlanError::InvalidItemType(input.item_type.clone()));
+    }
+    if input.content.trim().is_empty() {
+        return Err(SafetyPlanError::MissingItemContent);
+    }
+    Ok(())
+}
+
+/// Solo puede agregarse un ítem a un plan todavía en borrador de un
+/// paciente no archivado — mismo criterio que `add_contact`. El orden se
+/// calcula dentro del propio `item_type` (cada lista se reordena de forma
+/// independiente de las otras dos).
+pub fn add_item(conn: &Connection, plan_id: &str, input: SafetyPlanListItemInput) -> Result<SafetyPlanListItem, SafetyPlanError> {
+    require_editable_draft(conn, plan_id)?;
+    validate_item_input(&input)?;
+
+    let existing_of_type = safety_plans::list_items_by_plan(conn, plan_id)?.into_iter().filter(|i| i.item_type == input.item_type).count();
+    let id = uuid::Uuid::new_v4().to_string();
+    Ok(safety_plans::insert_list_item(
+        conn,
+        &NewSafetyPlanListItemRow {
+            id: &id,
+            safety_plan_id: plan_id,
+            item_type: &input.item_type,
+            content: input.content.trim(),
+            sort_order: existing_of_type as i64,
+        },
+    )?)
+}
+
+fn require_item_on_draft(conn: &Connection, item_id: &str) -> Result<SafetyPlanListItem, SafetyPlanError> {
+    let item = safety_plans::find_list_item_by_id(conn, item_id)?.ok_or(SafetyPlanError::ItemNotFound)?;
+    require_editable_draft(conn, &item.safety_plan_id)?;
+    Ok(item)
+}
+
+/// El tipo de un ítem nunca cambia después de creado (moverlo entre listas
+/// no tiene sentido de producto) — solo su contenido es editable.
+pub fn update_item(conn: &Connection, item_id: &str, content: &str) -> Result<SafetyPlanListItem, SafetyPlanError> {
+    let existing = require_item_on_draft(conn, item_id)?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(SafetyPlanError::MissingItemContent);
+    }
+    safety_plans::update_list_item(conn, item_id, trimmed, existing.sort_order)?.ok_or(SafetyPlanError::ItemNotFound)
+}
+
+pub fn delete_item(conn: &Connection, item_id: &str) -> Result<(), SafetyPlanError> {
+    require_item_on_draft(conn, item_id)?;
+    safety_plans::delete_list_item(conn, item_id)?;
     Ok(())
 }
 
@@ -713,8 +859,12 @@ mod tests {
 
     // ---- contactos ----
 
+    /// Un contacto de un tipo `CREATABLE_CONTACT_TYPES` cualquiera, para los
+    /// tests genéricos de CRUD que no ejercitan específicamente la
+    /// compatibilidad con `support_person` (ver `legacy_support_contact`
+    /// más abajo para esos casos).
     fn support_contact() -> SafetyPlanContactInput {
-        SafetyPlanContactInput { contact_type: "support_person".to_string(), name: "Amiga cercana".to_string(), relationship_or_role: Some("Amistad".to_string()), phone: Some("+56900000001".to_string()), notes: None }
+        SafetyPlanContactInput { contact_type: "distraction_person".to_string(), name: "Amiga cercana".to_string(), relationship_or_role: Some("Amistad".to_string()), phone: Some("+56900000001".to_string()), notes: None, address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false }
     }
 
     #[test]
@@ -723,7 +873,7 @@ mod tests {
         let patient_id = create_test_patient(&conn, "Paciente Doce");
         let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
         add_contact(&conn, &plan.id, support_contact()).unwrap();
-        add_contact(&conn, &plan.id, SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Psiquiatra tratante".to_string(), relationship_or_role: None, phone: None, notes: None }).unwrap();
+        add_contact(&conn, &plan.id, SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Psiquiatra tratante".to_string(), relationship_or_role: None, phone: None, notes: None, address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false }).unwrap();
 
         let contacts = list_contacts(&conn, &plan.id).unwrap();
         assert_eq!(contacts.len(), 2);
@@ -916,7 +1066,7 @@ mod tests {
         let c2 = add_contact(
             &conn,
             &plan1.id,
-            SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Psiquiatra tratante".to_string(), relationship_or_role: Some("Psiquiatra".to_string()), phone: Some("+56900000002".to_string()), notes: Some("Nota".to_string()) },
+            SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Psiquiatra tratante".to_string(), relationship_or_role: Some("Psiquiatra".to_string()), phone: Some("+56900000002".to_string()), notes: Some("Nota".to_string()), address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false },
         )
         .unwrap();
         confirm_draft(&conn, &plan1.id).unwrap();
@@ -926,7 +1076,7 @@ mod tests {
         assert_eq!(copied.len(), 2, "los dos contactos de la vigente deben copiarse");
 
         assert_eq!(copied[0].name, "Amiga cercana");
-        assert_eq!(copied[0].contact_type, "support_person");
+        assert_eq!(copied[0].contact_type, "distraction_person");
         assert_ne!(copied[0].id, c1.id, "el contacto copiado nunca comparte fila con el original");
 
         assert_eq!(copied[1].name, "Psiquiatra tratante");
@@ -961,7 +1111,7 @@ mod tests {
         let copied_contact = &copied_contacts[0];
 
         // Editar el contacto copiado en v2 nunca debe alterar el original de v1.
-        update_contact(&conn, &copied_contact.id, SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Nombre cambiado en v2".to_string(), relationship_or_role: None, phone: None, notes: None }).unwrap();
+        update_contact(&conn, &copied_contact.id, SafetyPlanContactInput { contact_type: "professional".to_string(), name: "Nombre cambiado en v2".to_string(), relationship_or_role: None, phone: None, notes: None, address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false }).unwrap();
         let original_after_edit = list_contacts(&conn, &plan1.id).unwrap();
         assert_eq!(original_after_edit[0].id, original_contact.id);
         assert_eq!(original_after_edit[0].name, "Amiga cercana", "editar v2 no debe alterar el contacto de v1");
@@ -1021,5 +1171,177 @@ mod tests {
 
         let err = create_draft_from_current(&conn, &patient_id).unwrap_err();
         assert!(matches!(err, SafetyPlanError::AlreadyHasDraft));
+    }
+
+    #[test]
+    fn create_draft_from_current_copies_list_items_with_new_ids_and_per_type_order() {
+        let conn = test_conn("from-current-copies-items");
+        let patient_id = create_test_patient(&conn, "Paciente Actualizar Ítems");
+        let plan1 = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let w1 = add_item(&conn, &plan1.id, SafetyPlanListItemInput { item_type: "warning_sign".to_string(), content: "Aislamiento".to_string() }).unwrap();
+        add_item(&conn, &plan1.id, SafetyPlanListItemInput { item_type: "warning_sign".to_string(), content: "Insomnio".to_string() }).unwrap();
+        add_item(&conn, &plan1.id, SafetyPlanListItemInput { item_type: "strategy".to_string(), content: "Respirar".to_string() }).unwrap();
+        confirm_draft(&conn, &plan1.id).unwrap();
+
+        let plan2 = create_draft_from_current(&conn, &patient_id).unwrap();
+        let copied = list_items(&conn, &plan2.id).unwrap();
+        assert_eq!(copied.len(), 3);
+        assert!(copied.iter().all(|i| i.id != w1.id));
+
+        let warnings: Vec<_> = copied.iter().filter(|i| i.item_type == "warning_sign").collect();
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].content, "Aislamiento");
+        assert_eq!(warnings[1].content, "Insomnio");
+    }
+
+    /// Compatibilidad post-Fase 19: `support_person` ya no es creable desde
+    /// `add_contact` (rechazado con `InvalidContactType`), pero un contacto
+    /// de ese tipo insertado antes del rediseño (aquí, directamente vía el
+    /// repositorio, simulando una fila preexistente) sigue siendo legible y
+    /// editable — incluso cambiándole solo el teléfono sin tocar su tipo.
+    #[test]
+    fn rejects_creating_a_support_person_contact_but_still_allows_editing_a_pre_existing_one() {
+        let conn = test_conn("legacy-support-person");
+        let patient_id = create_test_patient(&conn, "Paciente Legado Support Person");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+
+        let mut new_type = support_contact();
+        new_type.contact_type = "support_person".to_string();
+        let err = add_contact(&conn, &plan.id, new_type).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::InvalidContactType(t) if t == "support_person"));
+
+        let legacy_id = "legacy-c1";
+        crate::repositories::safety_plans::insert_contact(
+            &conn,
+            &crate::repositories::safety_plans::NewSafetyPlanContactRow {
+                id: legacy_id,
+                safety_plan_id: &plan.id,
+                contact_type: "support_person",
+                name: "Amiga de antes del rediseño",
+                relationship_or_role: None,
+                phone: Some("+56900000000"),
+                notes: None,
+                address: None,
+                service_phone: None,
+                is_emergency_contact: false,
+                is_crisis_service: false,
+                sort_order: 0,
+            },
+        )
+        .unwrap();
+
+        let mut edit = support_contact();
+        edit.contact_type = "support_person".to_string();
+        edit.phone = Some("+56911111111".to_string());
+        let updated = update_contact(&conn, legacy_id, edit).unwrap();
+        assert_eq!(updated.contact_type, "support_person");
+        assert_eq!(updated.phone.as_deref(), Some("+56911111111"));
+    }
+
+    // ---- ítems de lista (Paso 1/2/3-lugares) ----
+
+    #[test]
+    fn adds_and_lists_items_ordered_per_type() {
+        let conn = test_conn("items-add-list");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Uno");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "warning_sign".to_string(), content: "Aislamiento".to_string() }).unwrap();
+        add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "strategy".to_string(), content: "Salir a caminar".to_string() }).unwrap();
+        add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "warning_sign".to_string(), content: "Insomnio".to_string() }).unwrap();
+
+        let items = list_items(&conn, &plan.id).unwrap();
+        assert_eq!(items.len(), 3);
+        let warnings: Vec<_> = items.iter().filter(|i| i.item_type == "warning_sign").collect();
+        assert_eq!(warnings[0].content, "Aislamiento");
+        assert_eq!(warnings[1].content, "Insomnio");
+    }
+
+    #[test]
+    fn rejects_an_invalid_item_type() {
+        let conn = test_conn("items-invalid-type");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Dos");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let err = add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "inventado".to_string(), content: "Algo".to_string() }).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::InvalidItemType(t) if t == "inventado"));
+    }
+
+    #[test]
+    fn rejects_a_blank_item_content() {
+        let conn = test_conn("items-blank-content");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Tres");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let err = add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "warning_sign".to_string(), content: "   ".to_string() }).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::MissingItemContent));
+    }
+
+    #[test]
+    fn rejects_adding_an_item_to_a_confirmed_plan() {
+        let conn = test_conn("items-confirmed-plan");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Cuatro");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        confirm_draft(&conn, &plan.id).unwrap();
+        let err = add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "warning_sign".to_string(), content: "Algo".to_string() }).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::NotEditable));
+    }
+
+    #[test]
+    fn rejects_adding_an_item_after_the_patient_is_archived() {
+        let conn = test_conn("items-archived-add");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Archivado");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        patients_service::archive_patient(&conn, &patient_id).unwrap();
+        let err = add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "warning_sign".to_string(), content: "Algo".to_string() }).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::PatientArchived));
+    }
+
+    #[test]
+    fn updates_and_deletes_an_item_on_a_draft() {
+        let conn = test_conn("items-update-delete");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Cinco");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let item = add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "strategy".to_string(), content: "Original".to_string() }).unwrap();
+
+        let updated = update_item(&conn, &item.id, "Editado").unwrap();
+        assert_eq!(updated.content, "Editado");
+        assert_eq!(updated.item_type, "strategy", "editar el contenido nunca cambia el tipo del ítem");
+
+        delete_item(&conn, &item.id).unwrap();
+        assert!(list_items(&conn, &plan.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_updating_an_item_with_blank_content() {
+        let conn = test_conn("items-update-blank");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Seis");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let item = add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "strategy".to_string(), content: "Original".to_string() }).unwrap();
+        let err = update_item(&conn, &item.id, "   ").unwrap_err();
+        assert!(matches!(err, SafetyPlanError::MissingItemContent));
+    }
+
+    #[test]
+    fn rejects_editing_and_deleting_an_item_of_an_already_confirmed_plan() {
+        let conn = test_conn("items-edit-confirmed");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Siete");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        let item = add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "strategy".to_string(), content: "Original".to_string() }).unwrap();
+        confirm_draft(&conn, &plan.id).unwrap();
+
+        let err = update_item(&conn, &item.id, "Editado").unwrap_err();
+        assert!(matches!(err, SafetyPlanError::NotEditable));
+        let err = delete_item(&conn, &item.id).unwrap_err();
+        assert!(matches!(err, SafetyPlanError::NotEditable));
+    }
+
+    #[test]
+    fn a_confirmed_plans_items_are_still_readable() {
+        let conn = test_conn("items-readable-confirmed");
+        let patient_id = create_test_patient(&conn, "Paciente Ítems Ocho");
+        let plan = create_draft(&conn, &patient_id, empty_input()).unwrap();
+        add_item(&conn, &plan.id, SafetyPlanListItemInput { item_type: "distraction_place".to_string(), content: "Parque cercano".to_string() }).unwrap();
+        confirm_draft(&conn, &plan.id).unwrap();
+
+        let items = list_items(&conn, &plan.id).unwrap();
+        assert_eq!(items.len(), 1, "confirmar el plan no debe ocultar ni borrar sus ítems");
     }
 }

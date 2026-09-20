@@ -247,6 +247,14 @@ pub struct SafetyPlanContact {
     pub relationship_or_role: Option<String>,
     pub phone: Option<String>,
     pub notes: Option<String>,
+    /// Paso 5 (Fase de continuación post-Fase 19) — solo tiene sentido para
+    /// `contact_type` IN ('professional','service'); queda en `None`/`0`
+    /// para los demás tipos, incluidos todos los contactos creados antes de
+    /// este rediseño.
+    pub address: Option<String>,
+    pub service_phone: Option<String>,
+    pub is_emergency_contact: bool,
+    pub is_crisis_service: bool,
     pub sort_order: i64,
 }
 
@@ -258,6 +266,10 @@ pub struct NewSafetyPlanContactRow<'a> {
     pub relationship_or_role: Option<&'a str>,
     pub phone: Option<&'a str>,
     pub notes: Option<&'a str>,
+    pub address: Option<&'a str>,
+    pub service_phone: Option<&'a str>,
+    pub is_emergency_contact: bool,
+    pub is_crisis_service: bool,
     pub sort_order: i64,
 }
 
@@ -267,10 +279,15 @@ pub struct SafetyPlanContactUpdateRow<'a> {
     pub relationship_or_role: Option<&'a str>,
     pub phone: Option<&'a str>,
     pub notes: Option<&'a str>,
+    pub address: Option<&'a str>,
+    pub service_phone: Option<&'a str>,
+    pub is_emergency_contact: bool,
+    pub is_crisis_service: bool,
     pub sort_order: i64,
 }
 
-const CONTACT_COLUMNS: &str = "id, safety_plan_id, contact_type, name, relationship_or_role, phone, notes, sort_order";
+const CONTACT_COLUMNS: &str =
+    "id, safety_plan_id, contact_type, name, relationship_or_role, phone, notes, address, service_phone, is_emergency_contact, is_crisis_service, sort_order";
 
 fn map_contact_row(row: &Row) -> rusqlite::Result<SafetyPlanContact> {
     Ok(SafetyPlanContact {
@@ -281,15 +298,32 @@ fn map_contact_row(row: &Row) -> rusqlite::Result<SafetyPlanContact> {
         relationship_or_role: row.get(4)?,
         phone: row.get(5)?,
         notes: row.get(6)?,
-        sort_order: row.get(7)?,
+        address: row.get(7)?,
+        service_phone: row.get(8)?,
+        is_emergency_contact: row.get::<_, i64>(9)? != 0,
+        is_crisis_service: row.get::<_, i64>(10)? != 0,
+        sort_order: row.get(11)?,
     })
 }
 
 pub fn insert_contact(conn: &Connection, row: &NewSafetyPlanContactRow) -> rusqlite::Result<SafetyPlanContact> {
     conn.execute(
-        "INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name, relationship_or_role, phone, notes, sort_order) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![row.id, row.safety_plan_id, row.contact_type, row.name, row.relationship_or_role, row.phone, row.notes, row.sort_order],
+        "INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name, relationship_or_role, phone, notes, address, service_phone, is_emergency_contact, is_crisis_service, sort_order) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            row.id,
+            row.safety_plan_id,
+            row.contact_type,
+            row.name,
+            row.relationship_or_role,
+            row.phone,
+            row.notes,
+            row.address,
+            row.service_phone,
+            row.is_emergency_contact as i64,
+            row.is_crisis_service as i64,
+            row.sort_order
+        ],
     )?;
     find_contact_by_id(conn, row.id).map(|opt| opt.expect("se acaba de insertar"))
 }
@@ -307,8 +341,21 @@ pub fn list_contacts_by_plan(conn: &Connection, safety_plan_id: &str) -> rusqlit
 
 pub fn update_contact(conn: &Connection, id: &str, row: &SafetyPlanContactUpdateRow) -> rusqlite::Result<Option<SafetyPlanContact>> {
     let affected = conn.execute(
-        "UPDATE safety_plan_contacts SET contact_type = ?1, name = ?2, relationship_or_role = ?3, phone = ?4, notes = ?5, sort_order = ?6 WHERE id = ?7",
-        params![row.contact_type, row.name, row.relationship_or_role, row.phone, row.notes, row.sort_order, id],
+        "UPDATE safety_plan_contacts SET contact_type = ?1, name = ?2, relationship_or_role = ?3, phone = ?4, notes = ?5, \
+         address = ?6, service_phone = ?7, is_emergency_contact = ?8, is_crisis_service = ?9, sort_order = ?10 WHERE id = ?11",
+        params![
+            row.contact_type,
+            row.name,
+            row.relationship_or_role,
+            row.phone,
+            row.notes,
+            row.address,
+            row.service_phone,
+            row.is_emergency_contact as i64,
+            row.is_crisis_service as i64,
+            row.sort_order,
+            id
+        ],
     )?;
     if affected == 0 {
         return Ok(None);
@@ -321,6 +368,76 @@ pub fn update_contact(conn: &Connection, id: &str, row: &SafetyPlanContactUpdate
 /// valor histórico propio una vez eliminado.
 pub fn delete_contact(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     let affected = conn.execute("DELETE FROM safety_plan_contacts WHERE id = ?1", params![id])?;
+    Ok(affected > 0)
+}
+
+// ---- safety_plan_list_items (Paso 1/2/3-lugares: listas simples de texto) ----
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafetyPlanListItem {
+    pub id: String,
+    pub safety_plan_id: String,
+    pub item_type: String,
+    pub content: String,
+    pub sort_order: i64,
+}
+
+pub struct NewSafetyPlanListItemRow<'a> {
+    pub id: &'a str,
+    pub safety_plan_id: &'a str,
+    pub item_type: &'a str,
+    pub content: &'a str,
+    pub sort_order: i64,
+}
+
+const LIST_ITEM_COLUMNS: &str = "id, safety_plan_id, item_type, content, sort_order";
+
+fn map_list_item_row(row: &Row) -> rusqlite::Result<SafetyPlanListItem> {
+    Ok(SafetyPlanListItem {
+        id: row.get(0)?,
+        safety_plan_id: row.get(1)?,
+        item_type: row.get(2)?,
+        content: row.get(3)?,
+        sort_order: row.get(4)?,
+    })
+}
+
+pub fn insert_list_item(conn: &Connection, row: &NewSafetyPlanListItemRow) -> rusqlite::Result<SafetyPlanListItem> {
+    conn.execute(
+        "INSERT INTO safety_plan_list_items (id, safety_plan_id, item_type, content, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![row.id, row.safety_plan_id, row.item_type, row.content, row.sort_order],
+    )?;
+    find_list_item_by_id(conn, row.id).map(|opt| opt.expect("se acaba de insertar"))
+}
+
+pub fn find_list_item_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<SafetyPlanListItem>> {
+    conn.query_row(&format!("SELECT {LIST_ITEM_COLUMNS} FROM safety_plan_list_items WHERE id = ?1"), params![id], map_list_item_row).optional()
+}
+
+/// Todos los ítems de un plan, de cualquier tipo, ordenados por tipo y
+/// posición — el servicio los separa por `item_type` para las tres
+/// secciones (Paso 1, Paso 2, lugares del Paso 3).
+pub fn list_items_by_plan(conn: &Connection, safety_plan_id: &str) -> rusqlite::Result<Vec<SafetyPlanListItem>> {
+    let sql = format!("SELECT {LIST_ITEM_COLUMNS} FROM safety_plan_list_items WHERE safety_plan_id = ?1 ORDER BY item_type, sort_order, rowid");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![safety_plan_id], map_list_item_row)?;
+    rows.collect()
+}
+
+pub fn update_list_item(conn: &Connection, id: &str, content: &str, sort_order: i64) -> rusqlite::Result<Option<SafetyPlanListItem>> {
+    let affected = conn.execute(
+        "UPDATE safety_plan_list_items SET content = ?1, sort_order = ?2 WHERE id = ?3",
+        params![content, sort_order, id],
+    )?;
+    if affected == 0 {
+        return Ok(None);
+    }
+    find_list_item_by_id(conn, id)
+}
+
+pub fn delete_list_item(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let affected = conn.execute("DELETE FROM safety_plan_list_items WHERE id = ?1", params![id])?;
     Ok(affected > 0)
 }
 
@@ -532,8 +649,8 @@ mod tests {
         let patient_id = create_test_patient(&conn, "Paciente Once");
         insert(&conn, &minimal_row("p1", &patient_id, 1)).unwrap();
 
-        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c2", safety_plan_id: "p1", contact_type: "support_person", name: "Segundo", relationship_or_role: None, phone: None, notes: None, sort_order: 1 }).unwrap();
-        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c1", safety_plan_id: "p1", contact_type: "professional", name: "Primero", relationship_or_role: Some("Psiquiatra"), phone: Some("+56900000001"), notes: None, sort_order: 0 }).unwrap();
+        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c2", safety_plan_id: "p1", contact_type: "support_person", name: "Segundo", relationship_or_role: None, phone: None, notes: None, address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false, sort_order: 1 }).unwrap();
+        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c1", safety_plan_id: "p1", contact_type: "professional", name: "Primero", relationship_or_role: Some("Psiquiatra"), phone: Some("+56900000001"), notes: None, address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false, sort_order: 0 }).unwrap();
 
         let contacts = list_contacts_by_plan(&conn, "p1").unwrap();
         assert_eq!(contacts.len(), 2);
@@ -546,10 +663,14 @@ mod tests {
         let conn = test_conn("contacts-update-delete");
         let patient_id = create_test_patient(&conn, "Paciente Doce");
         insert(&conn, &minimal_row("p1", &patient_id, 1)).unwrap();
-        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c1", safety_plan_id: "p1", contact_type: "service", name: "Servicio Original", relationship_or_role: None, phone: None, notes: None, sort_order: 0 }).unwrap();
+        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c1", safety_plan_id: "p1", contact_type: "service", name: "Servicio Original", relationship_or_role: None, phone: None, notes: None, address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false, sort_order: 0 }).unwrap();
 
-        let updated = update_contact(&conn, "c1", &SafetyPlanContactUpdateRow { contact_type: "service", name: "Servicio Editado", relationship_or_role: None, phone: Some("+56900000002"), notes: None, sort_order: 0 }).unwrap().unwrap();
+        let updated = update_contact(&conn, "c1", &SafetyPlanContactUpdateRow { contact_type: "service", name: "Servicio Editado", relationship_or_role: None, phone: Some("+56900000002"), notes: None, address: Some("Av. Siempre Viva 123"), service_phone: Some("+56900000099"), is_emergency_contact: true, is_crisis_service: true, sort_order: 0 }).unwrap().unwrap();
         assert_eq!(updated.name, "Servicio Editado");
+        assert_eq!(updated.address.as_deref(), Some("Av. Siempre Viva 123"));
+        assert_eq!(updated.service_phone.as_deref(), Some("+56900000099"));
+        assert!(updated.is_emergency_contact);
+        assert!(updated.is_crisis_service);
 
         assert!(delete_contact(&conn, "c1").unwrap());
         assert!(list_contacts_by_plan(&conn, "p1").unwrap().is_empty());
@@ -560,7 +681,7 @@ mod tests {
         let conn = test_conn("cascade-delete");
         let patient_id = create_test_patient(&conn, "Paciente Trece");
         insert(&conn, &minimal_row("p1", &patient_id, 1)).unwrap();
-        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c1", safety_plan_id: "p1", contact_type: "support_person", name: "Contacto", relationship_or_role: None, phone: None, notes: None, sort_order: 0 }).unwrap();
+        insert_contact(&conn, &NewSafetyPlanContactRow { id: "c1", safety_plan_id: "p1", contact_type: "support_person", name: "Contacto", relationship_or_role: None, phone: None, notes: None, address: None, service_phone: None, is_emergency_contact: false, is_crisis_service: false, sort_order: 0 }).unwrap();
 
         assert!(delete_draft(&conn, "p1").unwrap());
         assert!(list_contacts_by_plan(&conn, "p1").unwrap().is_empty(), "ON DELETE CASCADE debe eliminar los contactos huérfanos");

@@ -1102,6 +1102,93 @@ ALTER TABLE documents ADD COLUMN key_wrap_version INTEGER NOT NULL DEFAULT 1
   CHECK (key_wrap_version IN (1, 2));
 "#;
 
+/// Rediseño del Plan de Seguridad según el modelo de seis pasos de
+/// Stanley & Brown (Fase de continuación post-Fase 19, validación real de
+/// Windows). El diseño de `SCHEMA_V6` cubría cuatro conceptos en campos de
+/// texto libre (`warning_signs`, `internal_strategies`,
+/// `social_support_strategies`, `means_safety`, `crisis_steps`) más una
+/// tabla de contactos genérica (`safety_plan_contacts`, con
+/// `contact_type` IN ('support_person','professional','service')) — sin
+/// distinguir "personas que ayudan a distraerse" (nueva sección, Paso 3) de
+/// "personas a las que pedir ayuda explícitamente en crisis" (Paso 4), y
+/// sin campos propios para instituciones/servicios de crisis (Paso 5:
+/// dirección, teléfono del servicio, si es contacto de emergencia, si es
+/// un servicio de urgencia).
+///
+/// Dos cambios, ambos puramente aditivos y sin transformar ni un byte de
+/// dato ya existente:
+///
+/// 1. Tabla nueva `safety_plan_list_items` para los tres pasos que son
+///    listas simples de texto agregable — Paso 1 (`warning_sign`), Paso 2
+///    (`strategy`) y las nuevas "Lugares" de Paso 3 (`distraction_place`).
+///    `warning_signs`/`internal_strategies` (columnas de `safety_plans`)
+///    NO se tocan ni se reinterpretan: siguen existiendo tal cual, con su
+///    contenido de texto libre anterior intacto, y sirven como "contenido
+///    heredado" que la UI sigue mostrando para planes ya creados — los
+///    planes nuevos usan exclusivamente `safety_plan_list_items`.
+/// 2. Se reconstruye `safety_plan_contacts` (mismo patrón ya usado en
+///    `SCHEMA_V9` para `documents`: crear la tabla nueva, copiar todas las
+///    filas sin transformarlas, eliminar la vieja, renombrar) únicamente
+///    para (a) ampliar el `CHECK` de `contact_type` con dos valores nuevos
+///    — `distraction_person` (personas de Paso 3) y `help_contact` (Paso
+///    4) — sin quitar ninguno de los tres anteriores (`support_person`
+///    sigue siendo un valor válido: las filas ya guardadas con ese tipo
+///    conservan su tipo exacto, nunca se reclasifican automáticamente
+///    hacia Paso 3 o Paso 4, precisamente porque el dato original no
+///    permite saber cuál de los dos era la intención); y (b) agregar
+///    cuatro columnas nuevas, todas nulas/`0` por defecto y sin ningún
+///    significado para los tipos de contacto anteriores — `address`,
+///    `service_phone`, `is_emergency_contact`, `is_crisis_service` — que
+///    solo usa Paso 5 (`contact_type` IN ('professional','service')).
+///
+/// Ningún plan ya confirmado o en borrador pierde contenido: los campos de
+/// texto libre existentes siguen ahí, y cada contacto ya guardado conserva
+/// exactamente su `contact_type` original. Los pasos 4 y 5 quedan vacíos
+/// para los registros ya existentes — no hay ninguna forma segura de
+/// inferir automáticamente, a partir de un `support_person` genérico
+/// anterior, si correspondía a "alguien que ayuda a distraerse" (Paso 3) o
+/// a "alguien a quien pedirle ayuda explícitamente en una crisis" (Paso 4).
+const SCHEMA_V11: &str = r#"
+CREATE TABLE safety_plan_list_items (
+  id TEXT PRIMARY KEY,
+  safety_plan_id TEXT NOT NULL REFERENCES safety_plans(id) ON DELETE CASCADE,
+  item_type TEXT NOT NULL CHECK (item_type IN ('warning_sign','strategy','distraction_place')),
+  content TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_safety_plan_list_items_plan ON safety_plan_list_items(safety_plan_id, item_type, sort_order);
+
+CREATE TABLE safety_plan_contacts_v11 (
+  id TEXT PRIMARY KEY,
+  safety_plan_id TEXT NOT NULL REFERENCES safety_plans(id) ON DELETE CASCADE,
+  contact_type TEXT NOT NULL CHECK (contact_type IN
+    ('support_person','professional','service','distraction_person','help_contact')),
+  name TEXT NOT NULL,
+  relationship_or_role TEXT,
+  phone TEXT,
+  notes TEXT,
+  address TEXT,
+  service_phone TEXT,
+  is_emergency_contact INTEGER NOT NULL DEFAULT 0 CHECK (is_emergency_contact IN (0,1)),
+  is_crisis_service INTEGER NOT NULL DEFAULT 0 CHECK (is_crisis_service IN (0,1)),
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT INTO safety_plan_contacts_v11 (id, safety_plan_id, contact_type, name, relationship_or_role, phone, notes, sort_order, created_at, updated_at)
+  SELECT id, safety_plan_id, contact_type, name, relationship_or_role, phone, notes, sort_order, created_at, updated_at
+  FROM safety_plan_contacts;
+DROP TABLE safety_plan_contacts;
+ALTER TABLE safety_plan_contacts_v11 RENAME TO safety_plan_contacts;
+CREATE INDEX idx_safety_plan_contacts_plan ON safety_plan_contacts(safety_plan_id, sort_order);
+CREATE TRIGGER trg_safety_plan_contacts_touch_updated_at
+AFTER UPDATE ON safety_plan_contacts
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE safety_plan_contacts SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+END;
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -1117,6 +1204,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V8).foreign_key_check(),
         M::up(SCHEMA_V9).foreign_key_check(),
         M::up(SCHEMA_V10).foreign_key_check(),
+        M::up(SCHEMA_V11).foreign_key_check(),
     ])
 }
 
@@ -1174,6 +1262,7 @@ mod tests {
         "episode_closures",
         "safety_plans",
         "safety_plan_contacts",
+        "safety_plan_list_items",
     ];
 
     fn migrated_vault(name: &str) -> (rusqlite::Connection, std::path::PathBuf, VaultKey) {
@@ -2637,7 +2726,7 @@ mod tests {
         assert!(cols.contains(&"key_wrap_version".to_string()), "documents debe tener key_wrap_version desde el arranque");
 
         let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(schema_version, 10, "una base nueva V1..V10 debe terminar en el esquema más reciente");
+        assert_eq!(schema_version, 11, "una base nueva V1..V11 debe terminar en el esquema más reciente");
     }
 
     #[test]
@@ -2684,7 +2773,7 @@ mod tests {
         assert_eq!(filename, "informe.pdf");
 
         let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(schema_version, 10);
+        assert_eq!(schema_version, 11, "run_migrations siempre lleva al esquema más reciente, no solo hasta V10");
     }
 
     #[test]
@@ -2749,5 +2838,135 @@ mod tests {
         assert_eq!(key_wrap_version, 1);
         let filename: String = conn.query_row("SELECT original_filename FROM documents WHERE id = 'd1'", [], |r| r.get(0)).unwrap();
         assert_eq!(filename, "informe.pdf", "el dato existente no se pierde ni se altera al migrar a V10");
+    }
+
+    #[test]
+    fn fresh_database_has_v11_safety_plan_list_items_table() {
+        let (conn, _path, _key) = migrated_vault("fresh-db-has-v11-list-items");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO safety_plans (id, patient_id, version, status) VALUES ('sp1', 'p1', 1, 'borrador')", []).unwrap();
+        conn.execute(
+            "INSERT INTO safety_plan_list_items (id, safety_plan_id, item_type, content, sort_order) VALUES ('i1', 'sp1', 'warning_sign', 'Insomnio', 0)",
+            [],
+        )
+        .unwrap();
+        let content: String = conn.query_row("SELECT content FROM safety_plan_list_items WHERE id = 'i1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(content, "Insomnio");
+    }
+
+    #[test]
+    fn v11_list_items_rejects_an_unknown_item_type() {
+        let (conn, _path, _key) = migrated_vault("v11-invalid-item-type");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO safety_plans (id, patient_id, version, status) VALUES ('sp1', 'p1', 1, 'borrador')", []).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO safety_plan_list_items (id, safety_plan_id, item_type, content) VALUES ('i1', 'sp1', 'not_a_real_type', 'x')",
+                [],
+            )
+            .unwrap_err();
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    #[test]
+    fn v11_deleting_a_safety_plan_cascades_to_its_list_items() {
+        let (conn, _path, _key) = migrated_vault("v11-list-items-cascade");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO safety_plans (id, patient_id, version, status) VALUES ('sp1', 'p1', 1, 'borrador')", []).unwrap();
+        conn.execute(
+            "INSERT INTO safety_plan_list_items (id, safety_plan_id, item_type, content) VALUES ('i1', 'sp1', 'strategy', 'Respirar')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM safety_plans WHERE id = 'sp1'", []).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM safety_plan_list_items", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "ON DELETE CASCADE debe eliminar los list_items huérfanos");
+    }
+
+    #[test]
+    fn v11_migration_preserves_existing_safety_plan_contacts_and_widens_contact_type() {
+        // Simula una base V10 real con un contacto 'support_person' ya guardado
+        // (el único tipo que existía para "persona de apoyo" antes de este
+        // rediseño), migrada ahora a V11.
+        let path = temp_db_path("v11-preserves-contacts");
+        let k = key(0xEB);
+        let mut conn = open_vault(&path, &k).unwrap();
+        let up_to_v10 = Migrations::new(vec![
+            M::up(SCHEMA_V1).foreign_key_check(),
+            M::up(SCHEMA_V2).foreign_key_check(),
+            M::up(SCHEMA_V3).foreign_key_check(),
+            M::up(SCHEMA_V4).foreign_key_check(),
+            M::up(SCHEMA_V5).foreign_key_check(),
+            M::up(SCHEMA_V6).foreign_key_check(),
+            M::up(SCHEMA_V7).foreign_key_check(),
+            M::up(SCHEMA_V8).foreign_key_check(),
+            M::up(SCHEMA_V9).foreign_key_check(),
+            M::up(SCHEMA_V10).foreign_key_check(),
+        ]);
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        up_to_v10.to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO safety_plans (id, patient_id, version, status) VALUES ('sp1', 'p1', 1, 'borrador')", []).unwrap();
+        conn.execute(
+            "INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name, relationship_or_role, phone, sort_order)
+             VALUES ('c1', 'sp1', 'support_person', 'Amiga Legacy', 'Amiga', '+56900000000', 0)",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).expect("V11 debe aplicarse sobre una base V10 con contactos ya existentes");
+
+        // El contacto anterior conserva EXACTAMENTE su contact_type original —
+        // nunca se reclasifica hacia distraction_person/help_contact.
+        let (contact_type, name, phone): (String, String, Option<String>) = conn
+            .query_row("SELECT contact_type, name, phone FROM safety_plan_contacts WHERE id = 'c1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(contact_type, "support_person", "un contacto V10 nunca se reclasifica automáticamente");
+        assert_eq!(name, "Amiga Legacy");
+        assert_eq!(phone.as_deref(), Some("+56900000000"));
+
+        // Las columnas nuevas existen y quedan en su valor por defecto para
+        // una fila que no las tenía.
+        let (address, is_emergency): (Option<String>, i64) = conn
+            .query_row("SELECT address, is_emergency_contact FROM safety_plan_contacts WHERE id = 'c1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert!(address.is_none());
+        assert_eq!(is_emergency, 0);
+
+        // El CHECK ahora acepta los dos tipos nuevos de Paso 3/Paso 4.
+        conn.execute(
+            "INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name) VALUES ('c2', 'sp1', 'distraction_person', 'Vecino')",
+            [],
+        )
+        .expect("distraction_person debe ser un contact_type válido después de V11");
+        conn.execute(
+            "INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name) VALUES ('c3', 'sp1', 'help_contact', 'Hermano')",
+            [],
+        )
+        .expect("help_contact debe ser un contact_type válido después de V11");
+
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(schema_version, 11);
+    }
+
+    #[test]
+    fn v11_migration_is_idempotent() {
+        let (mut conn, _path, _key) = migrated_vault("v11-idempotent");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        conn.execute("INSERT INTO safety_plans (id, patient_id, version, status) VALUES ('sp1', 'p1', 1, 'borrador')", []).unwrap();
+        conn.execute(
+            "INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name) VALUES ('c1', 'sp1', 'professional', 'Dra. X')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1..V11 ya vigentes no debería fallar");
+
+        let name: String = conn.query_row("SELECT name FROM safety_plan_contacts WHERE id = 'c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Dra. X");
     }
 }

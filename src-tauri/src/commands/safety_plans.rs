@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use crate::repositories::safety_plans::{SafetyPlan, SafetyPlanContact, SafetyPlanSummary};
+use crate::repositories::safety_plans::{SafetyPlan, SafetyPlanContact, SafetyPlanListItem, SafetyPlanSummary};
 use crate::security::VaultSession;
-use crate::services::safety_plans::{self, SafetyPlanContactInput, SafetyPlanInput};
+use crate::services::safety_plans::{self, SafetyPlanContactInput, SafetyPlanInput, SafetyPlanListItemInput};
 
 type SharedVaultSession = Arc<VaultSession>;
 
@@ -89,4 +89,27 @@ pub fn update_safety_plan_contact(contact_id: String, input: SafetyPlanContactIn
 #[tauri::command]
 pub fn delete_safety_plan_contact(contact_id: String, state: State<'_, SharedVaultSession>) -> Result<(), String> {
     state.with_connection(|conn| safety_plans::delete_contact(conn, &contact_id)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
+}
+
+/// Ítems de las listas agregables de los Pasos 1 (señales de alerta), 2
+/// (estrategias individuales) y 3-lugares (lugares de distracción) —
+/// nunca un único textarea. El frontend los separa por `itemType`.
+#[tauri::command]
+pub fn list_safety_plan_items(plan_id: String, state: State<'_, SharedVaultSession>) -> Result<Vec<SafetyPlanListItem>, String> {
+    state.with_connection(|conn| safety_plans::list_items(conn, &plan_id)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_safety_plan_item(plan_id: String, input: SafetyPlanListItemInput, state: State<'_, SharedVaultSession>) -> Result<SafetyPlanListItem, String> {
+    state.with_connection(|conn| safety_plans::add_item(conn, &plan_id, input)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_safety_plan_item(item_id: String, content: String, state: State<'_, SharedVaultSession>) -> Result<SafetyPlanListItem, String> {
+    state.with_connection(|conn| safety_plans::update_item(conn, &item_id, &content)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_safety_plan_item(item_id: String, state: State<'_, SharedVaultSession>) -> Result<(), String> {
+    state.with_connection(|conn| safety_plans::delete_item(conn, &item_id)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
 }
