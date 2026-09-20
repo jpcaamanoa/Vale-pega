@@ -6,21 +6,22 @@ import type { GeoDistributionItem, GeographicStatistics } from './types'
 type Filter = 'active' | 'all'
 
 /**
- * Paleta cualitativa derivada del único acento de marca (`--color-accent`)
- * con `color-mix`, en vez de colores nuevos escritos a mano — nunca se
- * introduce un hexadecimal fuera del sistema de tokens (ver
- * `docs/ARCHITECTURE.md` sección 14). "Otras" siempre usa un tono neutro
- * aparte, para que la categoría agrupada por privacidad se distinga del
- * resto a simple vista.
+ * Paleta categórica (FASE 4A) — ocho tonos realmente distintos entre sí
+ * (azul, naranja, turquesa, dorado, fucsia, verde, violeta, rojo), no
+ * derivados del único acento de marca por `color-mix` (ese enfoque
+ * producía prácticamente puros tonos de verde — el problema reportado).
+ * Orden fijo elegido para maximizar la separación perceptual entre
+ * colores adyacentes (donut/barras), incluida la distancia bajo las
+ * formas más comunes de daltonismo — nunca depende solo del color: cada
+ * segmento/barra siempre lleva también su etiqueta de texto (nombre,
+ * cantidad, porcentaje) al lado. "Otras" (la categoría agrupada por
+ * privacidad) usa un gris neutro aparte, fuera de esta paleta, para que
+ * nunca se confunda con una región/comuna real. Con más de ocho
+ * categorías (posible con comunas), el color se cicla — instrucción
+ * explícita de la usuaria: preferible a agregar más tonos que ya no se
+ * distinguirían entre sí.
  */
-const CHART_PALETTE = [
-  'var(--color-accent)',
-  'color-mix(in srgb, var(--color-accent) 75%, white)',
-  'color-mix(in srgb, var(--color-accent) 50%, white)',
-  'color-mix(in srgb, var(--color-accent) 85%, black)',
-  'color-mix(in srgb, var(--color-accent) 60%, black)',
-  'color-mix(in srgb, var(--color-accent) 30%, white)',
-]
+const CHART_PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
 const OTHER_COLOR = 'color-mix(in srgb, var(--color-muted-foreground) 35%, white)'
 const OTHER_LABEL = 'Otras'
 

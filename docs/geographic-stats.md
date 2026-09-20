@@ -348,3 +348,23 @@ borró, siguiendo la misma práctica ya usada en fases anteriores):
    del catálogo, algo que nunca se pidió y sería una superficie de riesgo
    innecesaria para datos que cambian con una frecuencia de años, no de
    días.
+
+## Paleta categórica (FASE 4A, autorizada explícitamente)
+
+La paleta original derivaba todos los tonos del único acento de marca (`--color-accent`, verde)
+vía `color-mix` — funcionalmente correcta (cada categoría tenía un color distinto y determinista),
+pero visualmente casi monocromática, exactamente el problema reportado tras la validación real en
+Windows. `CHART_PALETTE` (`src/features/statistics/StatisticsScreen.tsx`) pasa a ocho tonos
+realmente distintos entre sí (azul, naranja, turquesa, dorado, fucsia, verde, violeta, rojo),
+validados con la herramienta de accesibilidad de paletas categóricas del proyecto (separación
+perceptual bajo daltonismo protan/deutan/tritan, y frente a visión normal, ambas por encima del
+umbral objetivo entre colores adyacentes de un donut/gráfico de barras). `colorFor(item, index)` no
+cambió de firma ni de contrato — el donut y la leyenda, y cada barra de comuna, siguen llamando
+exactamente a la misma función, así que la correspondencia color-de-segmento ↔ color-del-punto-de-
+leyenda sigue siendo, por construcción, siempre exacta. "Otras" (la categoría agrupada por
+privacidad con menos de 3 pacientes) sigue usando un gris neutro completamente fuera de esta
+paleta, para que nunca se confunda con una región/comuna real. Con más de ocho categorías (posible
+en comunas), el color se cicla — instrucción explícita de la usuaria, preferible a añadir tonos que
+ya no se distinguirían entre sí. La lógica de N=1 sin agrupar, la separación región/comuna, cantidad
+y porcentaje, y el filtro al hacer clic en una región (validados en Windows real, ver informe de la
+fase anterior) no se tocaron en absoluto.
