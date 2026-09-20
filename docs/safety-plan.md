@@ -314,3 +314,62 @@ versiones, y sus rechazos: sin plan vigente, paciente archivado, borrador ya exi
   implementada.
 - No hay recordatorios automáticos de revisión del plan (`reviewed_at` es puramente informativo).
 - No hay exportación/PDF/impresión.
+
+## 20. Rediseño en seis pasos (Stanley & Brown) — fase de continuación post-Fase 19
+
+A partir de la validación real en Windows (19/09/2026) se rediseñó la pestaña para seguir
+explícitamente los seis pasos del modelo de Stanley & Brown, en vez de un formulario de textareas
+libres. **Migración forward-only `SCHEMA_V11`**, sin pérdida de datos:
+
+- **Tabla nueva `safety_plan_list_items`**: listas agregables de texto corto, con
+  `item_type CHECK IN ('warning_sign','strategy','distraction_place')`, `content`, `sort_order` y
+  `ON DELETE CASCADE` desde `safety_plans`. Cubre el Paso 1 (señales de alerta), el Paso 2
+  (estrategias individuales) y los *lugares* del Paso 3 — nunca un textarea único: cada entrada es
+  su propia fila, agregable/editable/eliminable de inmediato (`add_safety_plan_item` /
+  `update_safety_plan_item` / `delete_safety_plan_item`), igual que ya ocurría con los contactos
+  desde la Fase 12.
+- **`safety_plan_contacts` ampliada por *rebuild* de tabla** (mismo patrón que el rebuild de
+  `documents` en `SCHEMA_V9`: tabla nueva, `INSERT...SELECT` de todas las filas sin transformar,
+  `DROP` de la original, `RENAME`): `contact_type` se amplía a
+  `'support_person'|'professional'|'service'|'distraction_person'|'help_contact'`, y se agregan
+  `address`, `service_phone`, `is_emergency_contact`, `is_crisis_service` (booleanos como
+  `INTEGER CHECK (0,1)`, `0`/`NULL` por defecto para las filas existentes). `distraction_person`
+  cubre las *personas* del Paso 3; `help_contact`, el Paso 4; `professional`/`service` con los
+  cuatro campos nuevos, el Paso 5.
+- **`support_person` deja de ser creable**: `add_safety_plan_contact` valida contra
+  `CREATABLE_CONTACT_TYPES` (excluye `support_person`), pero `update_safety_plan_contact` sigue
+  validando contra el conjunto completo `VALID_CONTACT_TYPES` — un contacto `support_person` que ya
+  existía de antes del rediseño sigue siendo 100% legible y editable (incluida la interfaz nueva,
+  en un panel "registrado antes del rediseño"), simplemente ya no se ofrece como opción al crear
+  uno nuevo. Nunca se reclasifica automáticamente en `distraction_person`/`help_contact`: no hay
+  forma confiable de saber la intención original de cada fila antigua.
+- **Contenido narrativo heredado (`warning_signs`, `internal_strategies`,
+  `social_support_strategies`, `crisis_steps`, `notes`) se conserva íntegro, sin transformar**: la
+  migración no intenta partir texto libre en ítems de lista. El Paso 6 ("Construyendo un ambiente
+  seguro") reutiliza directamente `means_safety`, sin cambios — es el único de los seis pasos que
+  ya era, y sigue siendo, un campo narrativo único. Para planes creados **antes** del rediseño, el
+  frontend muestra el contenido heredado de cada campo (si no está vacío) en un panel plegable
+  "(registrado antes del rediseño)" dentro del paso conceptualmente más cercano, siempre editable;
+  `crisis_steps` y `notes` no tienen un paso nuevo equivalente y se muestran en un panel aparte
+  "Contenido heredado sin sección propia en el rediseño". Un plan creado **después** del rediseño
+  nunca puebla estos campos narrativos: solo usa `safety_plan_list_items` y los contactos nuevos.
+- `create_draft_from_current` ("Actualizar plan") ahora copia también los
+  `safety_plan_list_items` del plan vigente al nuevo borrador (con IDs nuevos, igual que ya hacía
+  con los contactos) — antes de este rediseño esta tabla no existía.
+- Tests: 65 tests de `safety_plans` (repositorio + servicio), incluyendo un test dedicado a la
+  compatibilidad de `support_person` (rechazo al crear, éxito al editar una fila preexistente) y un
+  test de migración forward (`v11_migration_preserves_existing_safety_plan_contacts_and_widens_contact_type`)
+  que construye una base bajo el esquema `V10`, inserta un contacto `support_person`, migra a
+  `V11` y verifica que el contacto original queda intacto y que los tipos nuevos ya son
+  insertables. Suite completa de backend: 811/811, `cargo clippy` limpio.
+- Frontend: `src/features/safety-plan/SafetyPlanTab.tsx` reescrito en seis secciones explícitas;
+  `ItemListEditor` (edición en línea, clic para editar, × para eliminar, persistencia inmediata por
+  ítem) reemplaza los antiguos `<Textarea>` de señales/estrategias/apoyo para los planes nuevos.
+  `npm run build`/`npm run lint` limpios (mismos patrones de advertencia ya tolerados en el resto
+  de la base: `watch()` de `react-hook-form`, `set-state-in-effect`).
+- **Limitación de validación conocida**: esta fase no incluyó una validación GUI interactiva
+  completa de los seis pasos en un entorno Linux headless (Xvfb sin compositor real) — los eventos
+  sintéticos de scroll/Tab no llegaban de forma fiable al WebView. Sí se verificó el arranque de la
+  aplicación, la creación de un vault desechable y la navegación básica. La validación GUI completa
+  de esta pantalla (crear/editar cada paso, confirmar, ver historial) queda pendiente para el
+  checklist de validación manual en Windows.
