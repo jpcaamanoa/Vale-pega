@@ -41,13 +41,16 @@ function ConfirmDialog({
   )
 }
 
-function GoalMetadataForm({ goal, onSaved }: { goal: Goal; onSaved: (goal: Goal) => void }) {
+const GOAL_METADATA_FORM_ID = 'goal-metadata-form'
+
+function GoalMetadataForm({ goal, onSaved, onDirtyChange }: { goal: Goal; onSaved: (goal: Goal) => void; onDirtyChange: (dirty: boolean) => void }) {
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const {
     register,
     handleSubmit,
-    formState: { errors, isSubmitting },
+    reset,
+    formState: { errors, isSubmitting, isDirty },
   } = useForm<GoalUpdateFormValues>({
     resolver: zodResolver(goalUpdateFormSchema),
     defaultValues: {
@@ -57,6 +60,10 @@ function GoalMetadataForm({ goal, onSaved }: { goal: Goal; onSaved: (goal: Goal)
       targetDate: goal.targetDate ?? '',
     },
   })
+
+  useEffect(() => {
+    onDirtyChange(isDirty)
+  }, [isDirty, onDirtyChange])
 
   const submit = async (values: GoalUpdateFormValues) => {
     setError(null)
@@ -71,13 +78,14 @@ function GoalMetadataForm({ goal, onSaved }: { goal: Goal; onSaved: (goal: Goal)
       const updated = await goalsApi.update(goal.id, input)
       onSaved(updated)
       setSaved(true)
+      reset(values)
     } catch (err) {
       setError(typeof err === 'string' ? err : 'No se pudo guardar el objetivo.')
     }
   }
 
   return (
-    <form onSubmit={handleSubmit(submit)} className="flex flex-col gap-4">
+    <form id={GOAL_METADATA_FORM_ID} onSubmit={handleSubmit(submit)} className="flex flex-col gap-4">
       <TextField label="Título" {...register('title')} error={errors.title?.message} />
       <Textarea label="Descripción" {...register('description')} error={errors.description?.message} />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -167,6 +175,26 @@ export function GoalDetailScreen() {
   const [addingIndicator, setAddingIndicator] = useState(false)
   const [editingIndicatorId, setEditingIndicatorId] = useState<string | null>(null)
   const [deletingIndicator, setDeletingIndicator] = useState<GoalIndicator | null>(null)
+  const [metadataDirty, setMetadataDirty] = useState(false)
+
+  // Aviso nativo del navegador/WebView al cerrar la ventana con cambios sin
+  // guardar en "Información del objetivo" — no cubre navegación interna de
+  // React Router (ver el confirm() en el botón "Volver", más abajo).
+  useEffect(() => {
+    if (!metadataDirty) return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [metadataDirty])
+
+  const handleBackToPatient = () => {
+    if (metadataDirty && !window.confirm('Tienes cambios sin guardar en este objetivo. ¿Salir de todas formas?')) {
+      return
+    }
+    navigate(`/patients/${patientId}`)
+  }
 
   const load = () => {
     if (!goalId) return
@@ -238,7 +266,7 @@ export function GoalDetailScreen() {
   const isArchived = goal.deletedAt !== null
 
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-10">
+    <div className={`mx-auto flex max-w-3xl flex-col gap-8 px-6 py-10 ${metadataDirty ? 'pb-24' : ''}`}>
       {isArchived && (
         <div className="rounded-lg border border-warning/40 bg-warning-soft px-4 py-3 text-sm text-warning">
           Este objetivo está archivado. No aparece en el listado activo hasta que se restaure. Sus indicadores y
@@ -249,7 +277,7 @@ export function GoalDetailScreen() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold text-foreground">{goal.title}</h1>
-          <button onClick={() => navigate(`/patients/${patientId}`)} className="text-sm text-accent hover:underline">
+          <button onClick={handleBackToPatient} className="text-sm text-accent hover:underline">
             Volver a la ficha del paciente
           </button>
         </div>
@@ -268,7 +296,7 @@ export function GoalDetailScreen() {
 
       <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
         <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Información del objetivo</h3>
-        <GoalMetadataForm goal={goal} onSaved={setGoal} />
+        <GoalMetadataForm goal={goal} onSaved={setGoal} onDirtyChange={setMetadataDirty} />
       </section>
 
       <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
@@ -381,6 +409,17 @@ export function GoalDetailScreen() {
           onDismiss={() => setDeletingIndicator(null)}
           onConfirm={handleDeleteIndicator}
         />
+      )}
+
+      {metadataDirty && (
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface-elevated px-6 py-3 shadow-lg">
+          <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
+            <span className="text-sm text-muted-foreground">Tienes cambios sin guardar en "Información del objetivo".</span>
+            <Button type="submit" form={GOAL_METADATA_FORM_ID}>
+              Guardar cambios
+            </Button>
+          </div>
+        </div>
       )}
     </div>
   )
