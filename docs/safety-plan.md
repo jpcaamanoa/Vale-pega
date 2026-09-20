@@ -486,10 +486,64 @@ El diálogo nativo de impresión es quien pregunta el destino (una carpeta y nom
 servicio externo. Cancelar el diálogo de impresión no genera ningún archivo parcial (comportamiento
 nativo del sistema operativo, no código de esta aplicación).
 
+### Corrección post-validación en Windows: leak del header/footer nativo de impresión
+
+La primera validación manual real en Windows encontró que el PDF exportado incluía, en el margen
+de cada página, una línea generada por el sistema operativo/WebView2 y **no** por esta aplicación:
+`20/9/26, 19:00   Cuaderno Clínico` seguida de `localhost:1420/#/patients/<uuid-del-paciente>` y el
+número de página.
+
+**Diagnóstico (leído directamente del código, no asumido):**
+
+- `SafetyPlanExport.tsx` nunca renderiza fecha/hora del sistema, ni la cadena "Cuaderno Clínico",
+  ni ninguna URL — se verificó leyendo el árbol de componentes completo.
+- `document.title` es literalmente `"Cuaderno Clínico"` (`index.html`), y la aplicación usa
+  `HashRouter` (`App.tsx`) — por eso `location.href`, al imprimir desde la ficha de un paciente,
+  es `.../index.html#/patients/<uuid>`.
+- Chromium/WebView2 dibuja por defecto, en su función nativa "Headers and footers" del diálogo de
+  impresión, exactamente estos tres datos (fecha/hora, `document.title`, `location.href`) más el
+  número de página — en el **margen físico de la página**, fuera del árbol DOM de la aplicación.
+  Por eso ningún `display: none` ni ninguna cadena oculta en nuestro HTML podía haberlo evitado:
+  el texto nunca pasó por nuestro DOM.
+
+**Corrección aplicada — sin nueva dependencia, sin cambiar el mecanismo de impresión:**
+
+```css
+@media print {
+  @page {
+    size: auto;
+    margin: 0;
+  }
+}
+```
+
+(`src/index.css`). `@page { margin: 0 }` es CSS estándar (CSS Paged Media) que elimina el margen de
+la página impresa — el espacio físico donde el motor de impresión dibuja su header/footer nativo.
+Sin ese margen, el header/footer nativo desaparece **estructuralmente**: no es una cadena ocultada,
+es la ausencia del área donde se dibuja. El padding visual del documento (32px) lo sigue dando el
+propio contenido (`SafetyPlanPrintDocument`), independiente del margen de la página.
+
+Adicionalmente se retiró el texto **"Versión N"** del cuerpo del documento (visible en el propio
+HTML, no parte del leak del navegador, pero igualmente un dato interno que no debía mostrarse a
+quien recibe el plan impreso). La fecha mostrada ahora proviene exclusivamente de
+`plan.confirmedAt`/`plan.reviewedAt` — nunca del número de versión interno.
+
+### Modelo de exportación puro (`exportModel.ts`)
+
+`buildSafetyPlanExportModel` (`src/features/safety-plan/exportModel.ts`) es una función pura, sin
+JSX ni DOM, que construye el modelo de datos exacto del documento a partir de `plan`/`contacts`/
+`items`/`patientName`/`includeName`. `SafetyPlanExport.tsx` solo renderiza ese modelo. Se extrajo
+específicamente para poder testear de forma directa y determinística qué contenido entra al
+documento exportado, sin depender de `window.print()` ni de un DOM real.
+
 ### Tests
 
-Sin framework de tests de frontend instalado (constraint preexistente, ver informes anteriores) —
-validado por `tsc -b` estricto y lectura de código. El contenido narrativo/de listas reutiliza
-exactamente los mismos datos ya cubiertos por los 65 tests de `services::safety_plans` — no hay
-lógica de negocio nueva en el backend para esta fase, solo una nueva representación de datos ya
-validados en el frontend.
+Se agregó `vitest` (devDependency, Vite-native, sin impacto en el bundle de producción — el
+proyecto no tenía ningún framework de tests de frontend) para poder testear directamente
+`buildSafetyPlanExportModel`. Ver `src/features/safety-plan/exportModel.test.ts` (9 tests, datos
+enteramente ficticios): sin UUID de paciente/plan, sin rutas `/patients/` ni `localhost`, sin
+"Versión N" (dos plantillas que solo difieren en `plan.version` producen el mismo documento),
+checkbox de nombre respetado en ambos sentidos sin fuga indirecta de identidad, los seis pasos en
+orden, teléfonos/direcciones de contactos incluidos cuando existen, y ninguna información fuera del
+contenido propio del plan. El resto del contenido narrativo/de listas sigue cubierto por los tests
+de `services::safety_plans` en el backend.
