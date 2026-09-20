@@ -15,6 +15,7 @@ import { useRecordActivity } from './features/auth/useRecordActivity'
 import { DashboardScreen } from './features/dashboard/DashboardScreen'
 import { GoalCreateScreen } from './features/goals/GoalCreateScreen'
 import { GoalDetailScreen } from './features/goals/GoalDetailScreen'
+import { LibraryScreen } from './features/library/LibraryScreen'
 import { PatientCreateScreen } from './features/patients/PatientCreateScreen'
 import { PatientDetailScreen } from './features/patients/PatientDetailScreen'
 import { PatientEditScreen } from './features/patients/PatientEditScreen'
@@ -125,6 +126,7 @@ function App() {
               <Route path="/agenda/:id" element={<AppointmentDetailScreen />} />
               <Route path="/agenda/:id/edit" element={<AppointmentEditScreen />} />
               <Route path="/statistics" element={<StatisticsScreen />} />
+              <Route path="/library" element={<LibraryScreen />} />
               <Route path="/settings" element={<SettingsScreen />} />
             </Route>
           </Routes>

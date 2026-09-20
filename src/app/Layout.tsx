@@ -35,6 +35,9 @@ export function Layout({ onLocked }: { onLocked: () => void }) {
             <NavLink to="/statistics" className={navLinkClassName}>
               Estadísticas
             </NavLink>
+            <NavLink to="/library" className={navLinkClassName}>
+              Biblioteca
+            </NavLink>
           </nav>
         </div>
         <div className="flex items-center gap-4 text-xs text-muted-foreground">

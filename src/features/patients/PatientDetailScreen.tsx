@@ -6,6 +6,7 @@ import { ClinicalProfileTab } from '../clinical-profile/ClinicalProfileTab'
 import { DocumentsTab } from '../documents/DocumentsTab'
 import { FormulationTab } from '../formulation/FormulationTab'
 import { GoalsTab } from '../goals/GoalsTab'
+import { PatientLibrarySection } from '../library/PatientLibrarySection'
 import { PaymentsTab } from '../payments/PaymentsTab'
 import { SafetyPlanTab } from '../safety-plan/SafetyPlanTab'
 import { SessionsTab } from '../sessions/SessionsTab'
@@ -22,6 +23,7 @@ type SectionId =
   | 'objetivos'
   | 'evaluaciones'
   | 'documentos'
+  | 'biblioteca'
   | 'pagos'
   | 'plan_seguridad'
   | 'linea_temporal'
@@ -35,6 +37,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'objetivos', label: 'Objetivos' },
   { id: 'evaluaciones', label: 'Evaluaciones' },
   { id: 'documentos', label: 'Documentos' },
+  { id: 'biblioteca', label: 'Biblioteca' },
   { id: 'pagos', label: 'Pagos' },
   { id: 'plan_seguridad', label: 'Plan de seguridad' },
   { id: 'linea_temporal', label: 'Línea temporal' },
@@ -47,7 +50,8 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 // real desde la Fase 7; "Procesos" es real desde la Fase 9; "Plan de
 // seguridad" es real desde la Fase 12; "Evaluaciones" es real desde la
 // Fase 13; "Formulación" es real desde la Fase 15; "Documentos" es real
-// desde la Fase 16.
+// desde la Fase 16; "Biblioteca" es real desde la fase de continuación
+// post-Fase 19.
 const SECTIONS_WITH_REAL_CONTENT: SectionId[] = [
   'resumen',
   'procesos',
@@ -57,6 +61,7 @@ const SECTIONS_WITH_REAL_CONTENT: SectionId[] = [
   'objetivos',
   'evaluaciones',
   'documentos',
+  'biblioteca',
   'pagos',
   'plan_seguridad',
 ]
@@ -207,6 +212,7 @@ export function PatientDetailScreen() {
           {section === 'objetivos' && id && <GoalsTab patientId={id} patientArchived={isArchived} />}
           {section === 'evaluaciones' && id && <AssessmentsTab patientId={id} patientArchived={isArchived} />}
           {section === 'documentos' && id && <DocumentsTab patientId={id} patientArchived={isArchived} />}
+          {section === 'biblioteca' && id && <PatientLibrarySection patientId={id} patientArchived={isArchived} />}
           {section === 'pagos' && id && <PaymentsTab patientId={id} patientArchived={isArchived} />}
           {section === 'plan_seguridad' && id && <SafetyPlanTab patientId={id} patientArchived={isArchived} />}
         </>
