@@ -1409,7 +1409,7 @@ mod tests {
                     conn,
                     &crate::repositories::documents::NewDocumentRow {
                         id: &v1_doc_id.to_string(),
-                        patient_id: &patient_id,
+                        patient_id: Some(&patient_id),
                         episode_id: None,
                         session_id: None,
                         category: Some("informe"),

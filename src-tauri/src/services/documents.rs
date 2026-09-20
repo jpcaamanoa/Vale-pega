@@ -351,7 +351,7 @@ pub fn create_document(session: &VaultSession, files_root: &Path, input: NewDocu
             conn,
             &NewDocumentRow {
                 id: &document_id.to_string(),
-                patient_id: &input.patient_id,
+                patient_id: Some(&input.patient_id),
                 episode_id: input.episode_id.as_deref(),
                 session_id: input.session_id.as_deref(),
                 category: category.as_deref(),
@@ -670,7 +670,7 @@ mod tests {
                     conn,
                     &documents::NewDocumentRow {
                         id: &document_id.to_string(),
-                        patient_id: &patient_id,
+                        patient_id: Some(&patient_id),
                         episode_id: None,
                         session_id: None,
                         category: Some("informe"),
@@ -743,7 +743,7 @@ mod tests {
                     conn,
                     &documents::NewDocumentRow {
                         id: &document_id.to_string(),
-                        patient_id: &patient_id,
+                        patient_id: Some(&patient_id),
                         episode_id: None,
                         session_id: None,
                         category: Some("informe"),
@@ -813,7 +813,7 @@ mod tests {
                     conn,
                     &documents::NewDocumentRow {
                         id: &document_id.to_string(),
-                        patient_id: &patient_id,
+                        patient_id: Some(&patient_id),
                         episode_id: None,
                         session_id: None,
                         category: Some("informe"),

@@ -97,7 +97,13 @@ pub struct DocumentSummary {
 
 pub struct NewDocumentRow<'a> {
     pub id: &'a str,
-    pub patient_id: &'a str,
+    /// `None` únicamente para un documento propiedad de un recurso de Biblioteca
+    /// (`services::library`, fase de continuación post-Fase 19) — nunca para un documento
+    /// clínico de paciente creado por `services::documents::create_document`, que siempre pasa
+    /// `Some(...)` tras validar que el paciente existe y no está archivado. La columna SQL ya era
+    /// nullable desde `SCHEMA_V1` (`ON DELETE SET NULL`); este campo solo refleja en Rust una
+    /// posibilidad que la base de datos siempre permitió.
+    pub patient_id: Option<&'a str>,
     pub episode_id: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub category: Option<&'a str>,
@@ -343,7 +349,7 @@ mod tests {
         let storage_path: &'static str = Box::leak(format!("files/ab/{id}.enc").into_boxed_str());
         NewDocumentRow {
             id,
-            patient_id,
+            patient_id: Some(patient_id),
             episode_id: None,
             session_id: None,
             category: Some("informe"),
