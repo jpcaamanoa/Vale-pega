@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
+import { TextField } from '../../components/ui/TextField'
 import { AssessmentsTab } from '../assessments/AssessmentsTab'
 import { ClinicalProfileTab } from '../clinical-profile/ClinicalProfileTab'
 import { DocumentsTab } from '../documents/DocumentsTab'
@@ -12,7 +13,7 @@ import { SafetyPlanTab } from '../safety-plan/SafetyPlanTab'
 import { SessionsTab } from '../sessions/SessionsTab'
 import { ProcessesTab } from '../treatment-episodes/ProcessesTab'
 import { patientsApi } from './api'
-import { PATIENT_STATUS_LABELS, type Patient } from './types'
+import { PATIENT_STATUS_LABELS, type Patient, type PatientHardDeleteScope } from './types'
 
 type SectionId =
   | 'resumen'
@@ -28,6 +29,11 @@ type SectionId =
   | 'plan_seguridad'
   | 'linea_temporal'
 
+// "Línea temporal" (FASE 4B, decisión de producto explícita): oculta de la navegación hasta
+// tener una implementación real — nunca un placeholder "Próximamente" visible en una RC. `'linea_temporal'`
+// se conserva en `SectionId` (tipo) y en el resto de la estructura de la pantalla porque no hay
+// ningún motivo para borrar código/estructuras reutilizables, solo para dejar de mostrar la
+// pestaña — ver `docs/ARCHITECTURE.md` sobre esta decisión.
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'resumen', label: 'Resumen' },
   { id: 'procesos', label: 'Procesos' },
@@ -40,17 +46,13 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'biblioteca', label: 'Biblioteca' },
   { id: 'pagos', label: 'Pagos' },
   { id: 'plan_seguridad', label: 'Plan de seguridad' },
-  { id: 'linea_temporal', label: 'Línea temporal' },
 ]
 
-// Estas secciones se implementan en fases posteriores (línea temporal,
-// etc.) — la navegación ya está preparada para recibirlas sin rehacer la
-// ficha del paciente. "Sesiones" es real desde la Fase 4; "Objetivos" es
-// real desde la Fase 5; "Antecedentes" es real desde la Fase 6; "Pagos" es
-// real desde la Fase 7; "Procesos" es real desde la Fase 9; "Plan de
-// seguridad" es real desde la Fase 12; "Evaluaciones" es real desde la
-// Fase 13; "Formulación" es real desde la Fase 15; "Documentos" es real
-// desde la Fase 16; "Biblioteca" es real desde la fase de continuación
+// Estas secciones ya están en `SECTIONS` y tienen contenido real. "Sesiones" es real desde la
+// Fase 4; "Objetivos" es real desde la Fase 5; "Antecedentes" es real desde la Fase 6; "Pagos" es
+// real desde la Fase 7; "Procesos" es real desde la Fase 9; "Plan de seguridad" es real desde la
+// Fase 12; "Evaluaciones" es real desde la Fase 13; "Formulación" es real desde la Fase 15;
+// "Documentos" es real desde la Fase 16; "Biblioteca" es real desde la fase de continuación
 // post-Fase 19.
 const SECTIONS_WITH_REAL_CONTENT: SectionId[] = [
   'resumen',
@@ -109,6 +111,136 @@ function ResumenSection({ patient }: { patient: Patient }) {
   )
 }
 
+const HARD_DELETE_CONFIRM_WORD = 'ELIMINAR'
+
+const HARD_DELETE_SCOPE_LABELS: { key: Exclude<keyof PatientHardDeleteScope, 'hasClinicalProfile'>; label: string }[] = [
+  { key: 'sessions', label: 'Sesiones' },
+  { key: 'caseFormulations', label: 'Formulaciones' },
+  { key: 'therapeuticGoals', label: 'Objetivos terapéuticos' },
+  { key: 'assessmentAdministrations', label: 'Evaluaciones' },
+  { key: 'payments', label: 'Pagos' },
+  { key: 'treatmentEpisodes', label: 'Procesos' },
+  { key: 'safetyPlans', label: 'Versiones del plan de seguridad' },
+  { key: 'documents', label: 'Documentos propios' },
+  { key: 'appointments', label: 'Citas de agenda' },
+  { key: 'reminders', label: 'Recordatorios' },
+  { key: 'libraryAssociations', label: 'Asociaciones con recursos de Biblioteca' },
+]
+
+/** Modal de "Eliminar permanentemente" (FASE 2B) — solo alcanzable desde un paciente ya
+ * archivado. Muestra el resumen real del alcance (`patientsApi.getHardDeleteScope`) antes de
+ * exigir escribir "ELIMINAR". Los recursos globales de Biblioteca nunca se mencionan como algo
+ * que se borra — solo la asociación con este paciente, ver `services::patients::hard_delete_patient`. */
+function HardDeletePatientModal({ patientId, onDeleted, onCancel }: { patientId: string; onDeleted: () => void; onCancel: () => void }) {
+  const [scope, setScope] = useState<PatientHardDeleteScope | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [confirmText, setConfirmText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const loadScope = () => {
+    setError(null)
+    patientsApi
+      .getHardDeleteScope(patientId)
+      .then(setScope)
+      .catch((err) => setError(typeof err === 'string' ? err : 'No se pudo cargar el resumen del paciente. Intenta nuevamente.'))
+  }
+
+  useEffect(loadScope, [patientId])
+
+  const submit = async () => {
+    setError(null)
+    setSubmitting(true)
+    try {
+      await patientsApi.hardDelete(patientId)
+      onDeleted()
+    } catch (err) {
+      setError(typeof err === 'string' ? err : 'No se pudo eliminar el paciente permanentemente.')
+      setSubmitting(false)
+    }
+  }
+
+  const visibleScopeRows = scope ? HARD_DELETE_SCOPE_LABELS.filter(({ key }) => scope[key] > 0) : []
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/40 px-4 py-8">
+      <div className="my-auto max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-surface-elevated p-6 shadow-lg">
+        <h2 className="mb-3 text-base font-semibold text-foreground">Eliminar permanentemente esta ficha</h2>
+        <p className="mb-4 rounded-lg border border-danger bg-danger-soft px-3 py-2 text-sm text-danger">
+          Esta acción eliminará permanentemente la ficha del paciente y sus datos asociados. No se puede deshacer.
+        </p>
+        <p className="mb-4 rounded-lg border border-warning/40 bg-warning-soft px-3 py-2 text-sm text-warning">
+          Los registros clínicos pueden estar sujetos a obligaciones de conservación. Verifica los requisitos
+          aplicables antes de eliminarlos permanentemente.
+        </p>
+
+        {scope === null && !error && <p className="mb-4 text-sm text-muted-foreground">Cargando resumen…</p>}
+        {scope === null && error && (
+          <div className="mb-4 flex flex-col gap-2">
+            <p className="text-sm text-danger">{error}</p>
+            <div>
+              <Button type="button" variant="secondary" onClick={loadScope}>
+                Reintentar
+              </Button>
+            </div>
+          </div>
+        )}
+        {scope && (
+          <div className="mb-4">
+            <p className="mb-2 text-sm font-medium text-foreground">Se eliminará también:</p>
+            {visibleScopeRows.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Este paciente no tiene datos clínicos registrados todavía.</p>
+            ) : (
+              <ul className="flex flex-col gap-1 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground">
+                {visibleScopeRows.map(({ key, label }) => (
+                  <li key={key} className="flex justify-between">
+                    <span>{label}</span>
+                    <span className="text-foreground">{scope[key]}</span>
+                  </li>
+                ))}
+                {scope.hasClinicalProfile && (
+                  <li className="flex justify-between">
+                    <span>Antecedentes clínicos</span>
+                    <span className="text-foreground">Sí</span>
+                  </li>
+                )}
+              </ul>
+            )}
+            {scope.libraryAssociations > 0 && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Los recursos de Biblioteca asociados nunca se eliminan — solo se quita su asociación con este paciente.
+              </p>
+            )}
+          </div>
+        )}
+
+        {scope && error && <p className="mb-4 text-sm text-danger">{error}</p>}
+
+        <TextField
+          label={`Escribe ${HARD_DELETE_CONFIRM_WORD} para confirmar`}
+          value={confirmText}
+          onChange={(e) => setConfirmText(e.target.value)}
+          placeholder={HARD_DELETE_CONFIRM_WORD}
+        />
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onCancel} disabled={submitting}>
+            Cancelar
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="border-danger text-danger hover:bg-danger-soft"
+            onClick={submit}
+            disabled={submitting || scope === null || confirmText !== HARD_DELETE_CONFIRM_WORD}
+          >
+            Eliminar permanentemente
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function PatientDetailScreen() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -117,6 +249,7 @@ export function PatientDetailScreen() {
   const [section, setSection] = useState<SectionId>('resumen')
   const [confirmingArchive, setConfirmingArchive] = useState(false)
   const [confirmingRestore, setConfirmingRestore] = useState(false)
+  const [confirmingHardDelete, setConfirmingHardDelete] = useState(false)
 
   const load = () => {
     if (!id) return
@@ -170,9 +303,14 @@ export function PatientDetailScreen() {
         </div>
         <div className="flex gap-2">
           {isArchived ? (
-            <Button variant="secondary" onClick={() => setConfirmingRestore(true)}>
-              Restaurar
-            </Button>
+            <>
+              <Button variant="secondary" onClick={() => setConfirmingRestore(true)}>
+                Restaurar
+              </Button>
+              <Button variant="secondary" className="border-danger text-danger hover:bg-danger-soft" onClick={() => setConfirmingHardDelete(true)}>
+                Eliminar permanentemente
+              </Button>
+            </>
           ) : (
             <>
               <Button variant="secondary" onClick={() => navigate(`/patients/${id}/edit`)}>
@@ -254,6 +392,10 @@ export function PatientDetailScreen() {
             </div>
           </div>
         </div>
+      )}
+
+      {confirmingHardDelete && id && (
+        <HardDeletePatientModal patientId={id} onDeleted={() => navigate('/patients')} onCancel={() => setConfirmingHardDelete(false)} />
       )}
     </div>
   )

@@ -9,17 +9,25 @@
 //! (`create_patient`, `list_patients`, ...), nunca un `run_sql(query)`
 //! genérico.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::security::VaultSession;
 use crate::services::patients::{self, GeographicStatistics, PatientInput, PatientListItem};
-use crate::repositories::patients::Patient;
+use crate::repositories::patients::{Patient, PatientHardDeleteScope};
 
 type SharedVaultSession = Arc<VaultSession>;
 
 const LOCKED_MESSAGE: &str = "el vault está bloqueado";
+
+fn files_root(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("vault").join("files"))
+        .map_err(|e| format!("no se pudo determinar el directorio de datos de la aplicación: {e}"))
+}
 
 #[tauri::command]
 pub fn create_patient(input: PatientInput, state: State<'_, SharedVaultSession>) -> Result<Patient, String> {
@@ -89,6 +97,25 @@ pub fn restore_patient(id: String, state: State<'_, SharedVaultSession>) -> Resu
         .with_connection(|conn| patients::restore_patient(conn, &id))
         .map_err(|_| LOCKED_MESSAGE.to_string())?
         .map_err(|e| e.to_string())
+}
+
+/// Resumen de solo lectura para el modal de confirmación de "Eliminar permanentemente" — nunca
+/// borra nada.
+#[tauri::command]
+pub fn get_patient_hard_delete_scope(id: String, state: State<'_, SharedVaultSession>) -> Result<PatientHardDeleteScope, String> {
+    state
+        .with_connection(|conn| patients::hard_delete_scope(conn, &id))
+        .map_err(|_| LOCKED_MESSAGE.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Borrado físico e irreversible — solo alcanzable desde "Archivados" en el frontend, tras la
+/// confirmación escrita "ELIMINAR". Ver `services::patients::hard_delete_patient` para el modelo
+/// completo de validaciones/atomicidad.
+#[tauri::command]
+pub fn hard_delete_patient(app: AppHandle, id: String, state: State<'_, SharedVaultSession>) -> Result<(), String> {
+    let root = files_root(&app)?;
+    patients::hard_delete_patient(&state, &root, &id).map_err(|e| e.to_string())
 }
 
 /// Estadísticas geográficas agregadas (Fase 6.1) para la pantalla

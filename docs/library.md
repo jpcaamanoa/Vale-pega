@@ -162,3 +162,43 @@ es la misma causa raíz).
 
 **Riesgo residual**: ninguno sobre integridad de datos. Queda pendiente la validación manual real en
 Windows sobre el vault preexistente que originó el reporte.
+
+## 13. Borrado permanente de recursos (FASE 2A, autorizada explícitamente)
+
+Hasta esta fase, "Eliminar" un recurso era siempre `archive_resource` (reversible). Esta fase
+agrega un borrado físico e irreversible, explícitamente separado del archivado y accesible
+únicamente desde "Archivados" (nunca un botón destructivo junto a "Abrir" en un recurso activo).
+
+**Requisitos, ambos validados en el servidor antes de tocar nada**:
+
+1. **El recurso debe estar archivado.** `services::library::hard_delete_resource` rechaza con
+   `LibraryError::MustBeArchivedFirst` si `deleted_at IS NULL` — reforzado también a nivel de SQL
+   (`repositories::library::hard_delete` incluye `WHERE deleted_at IS NOT NULL`).
+2. **Cero asociaciones con pacientes.** A diferencia de `archive_resource` (que acepta un `force`
+   tras avisar), aquí **no existe** un `force`: un borrado físico nunca puede dejar una fila de
+   `library_resource_patients` apuntando a un recurso que ya no existe. Si `count_patients_for_resource
+   > 0`, se rechaza con `LibraryError::LinkedToPatientsBlocksHardDelete(n)` — el frontend muestra el
+   conteo y un enlace a "Ver pacientes asociados" para desvincular primero.
+
+**Atomicidad**: si el recurso tiene un archivo (`file_document_id`), su fila de `documents` y la
+fila de `library_resources` se borran dentro de una única transacción SQL manual (`BEGIN IMMEDIATE`
+… `COMMIT`, `ROLLBACK` ante error). El ciphertext se borra del disco **después** de que la
+transacción confirma, en modo best-effort — mismo modelo que el borrado permanente de pacientes
+(ver `docs/patients-vertical.md`): en el peor caso queda un ciphertext huérfano detectable por
+`services::documents::find_orphan_storage_paths`, nunca una fila de base apuntando a un archivo
+inexistente ni un estado a medias.
+
+**Nunca afecta otros recursos** ni ningún documento privado de un paciente — el `document_id`
+borrado siempre pertenece exclusivamente a ese recurso (`patient_id = NULL`, ver §1).
+
+**Tests** (`services::library::tests`): rechazo sobre recurso activo; bloqueo mientras sigue
+asociado (con el conteo exacto); éxito tras desvincular; borrado de un recurso sin archivo; borrado
+de un recurso con archivo (verifica que el ciphertext desaparece del disco y que no queda ninguna
+fila huérfana en `documents`); y que borrar un recurso nunca afecta a otro.
+
+## 14. Exportar/Imprimir (nota de alcance)
+
+La Biblioteca no tiene una función de exportación propia — "Exportar copia" (§ existente) ya
+entrega el archivo original descifrado a un destino elegido por la usuaria. La función de
+exportar/imprimir con generación de PDF vía el diálogo nativo del sistema operativo (FASE 3) es
+exclusiva del Plan de Seguridad — ver `docs/safety-plan.md` §22.

@@ -168,6 +168,15 @@ pub fn restore(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     Ok(affected > 0)
 }
 
+/// Borrado físico de la fila — irreversible, de uso exclusivo de
+/// `services::library::hard_delete_resource`. El `WHERE deleted_at IS NOT NULL` es una segunda
+/// barrera a nivel de SQL (además de la que ya hace el servicio): nunca borra un recurso que no
+/// esté ya archivado, ni aunque un llamador futuro se salte la validación de servicio por error.
+pub fn hard_delete(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let affected = conn.execute("DELETE FROM library_resources WHERE id = ?1 AND deleted_at IS NOT NULL", params![id])?;
+    Ok(affected > 0)
+}
+
 // ---- library_resource_patients (relación N:M) ----
 
 /// Idempotente: si el enlace ya existía, no falla ni lo duplica (`INSERT OR IGNORE`) — devuelve si

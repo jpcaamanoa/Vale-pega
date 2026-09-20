@@ -321,10 +321,80 @@ function LinkedPatientsModal({ resource, onClose }: { resource: LibraryResourceS
   )
 }
 
+const HARD_DELETE_CONFIRM_WORD = 'ELIMINAR'
+
+/** Modal de "Eliminar permanentemente" (FASE 2A) — solo alcanzable desde "Archivados". Si el
+ * recurso sigue asociado a algún paciente, el backend lo rechaza (`LinkedToPatientsBlocksHardDelete`,
+ * sin `force`: a diferencia de archivar, un borrado físico nunca puede dejar una asociación
+ * apuntando a un recurso que ya no existe) — este modal entonces muestra cuántos y ofrece abrir
+ * "Pacientes" para desasociar antes de reintentar. */
+function HardDeleteResourceModal({ resource, onDeleted, onCancel }: { resource: LibraryResourceSummary; onDeleted: () => void; onCancel: () => void }) {
+  const [confirmText, setConfirmText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [showLinkedPatients, setShowLinkedPatients] = useState(false)
+
+  const submit = async () => {
+    setError(null)
+    setSubmitting(true)
+    try {
+      await libraryApi.hardDelete(resource.id)
+      onDeleted()
+    } catch (err) {
+      setError(typeof err === 'string' ? err : 'No se pudo eliminar el recurso permanentemente.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/40 px-4 py-8">
+      <div className="my-auto max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl bg-surface-elevated p-6 shadow-lg">
+        <h2 className="mb-3 text-base font-semibold text-foreground">Eliminar permanentemente «{resource.title}»</h2>
+        <p className="mb-4 rounded-lg border border-danger bg-danger-soft px-3 py-2 text-sm text-danger">
+          Esta acción eliminará permanentemente el recurso y no se puede deshacer.
+        </p>
+        {error && (
+          <div className="mb-4 rounded-lg border border-danger bg-danger-soft px-3 py-2 text-sm text-danger">
+            <p>{error}</p>
+            {error.includes('asociado') && (
+              <button type="button" className="mt-1 underline" onClick={() => setShowLinkedPatients(true)}>
+                Ver pacientes asociados
+              </button>
+            )}
+          </div>
+        )}
+        <TextField
+          label={`Escribe ${HARD_DELETE_CONFIRM_WORD} para confirmar`}
+          value={confirmText}
+          onChange={(e) => setConfirmText(e.target.value)}
+          placeholder={HARD_DELETE_CONFIRM_WORD}
+        />
+        <div className="mt-5 flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onCancel} disabled={submitting}>
+            Cancelar
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="border-danger text-danger hover:bg-danger-soft"
+            onClick={submit}
+            disabled={submitting || confirmText !== HARD_DELETE_CONFIRM_WORD}
+          >
+            Eliminar permanentemente
+          </Button>
+        </div>
+      </div>
+      {showLinkedPatients && <LinkedPatientsModal resource={resource} onClose={() => setShowLinkedPatients(false)} />}
+    </div>
+  )
+}
+
 function ResourceRow({ resource, view, onChanged }: { resource: LibraryResourceSummary; view: ViewMode; onChanged: () => void }) {
   const [editing, setEditing] = useState(false)
   const [previewing, setPreviewing] = useState(false)
   const [managingPatients, setManagingPatients] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -417,6 +487,11 @@ function ResourceRow({ resource, view, onChanged }: { resource: LibraryResourceS
           <Button type="button" variant="secondary" onClick={archiveOrRestore} disabled={busy}>
             {view === 'active' ? 'Archivar' : 'Restaurar'}
           </Button>
+          {view === 'archived' && (
+            <Button type="button" variant="secondary" className="border-danger text-danger hover:bg-danger-soft" onClick={() => setDeleting(true)} disabled={busy}>
+              Eliminar permanentemente
+            </Button>
+          )}
         </div>
       </td>
       {editing && (
@@ -431,6 +506,16 @@ function ResourceRow({ resource, view, onChanged }: { resource: LibraryResourceS
       )}
       {previewing && <ImagePreviewModal resource={resource} onClose={() => setPreviewing(false)} />}
       {managingPatients && <LinkedPatientsModal resource={resource} onClose={() => setManagingPatients(false)} />}
+      {deleting && (
+        <HardDeleteResourceModal
+          resource={resource}
+          onDeleted={() => {
+            setDeleting(false)
+            onChanged()
+          }}
+          onCancel={() => setDeleting(false)}
+        />
+      )}
     </tr>
   )
 }

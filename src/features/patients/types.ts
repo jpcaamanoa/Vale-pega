@@ -70,3 +70,20 @@ export const PATIENT_STATUS_LABELS: Record<PatientStatus, string> = {
  * cambio de valor; ver `PatientForm.tsx`.
  */
 export const SELECTABLE_PATIENT_STATUSES: PatientStatus[] = ['activo', 'inactivo', 'alta']
+
+/** Resumen de solo lectura de todo lo que se perdería al eliminar permanentemente un paciente
+ * (FASE 2B) — para el modal de confirmación de "Eliminar permanentemente". */
+export interface PatientHardDeleteScope {
+  hasClinicalProfile: boolean
+  sessions: number
+  caseFormulations: number
+  therapeuticGoals: number
+  assessmentAdministrations: number
+  payments: number
+  treatmentEpisodes: number
+  safetyPlans: number
+  documents: number
+  appointments: number
+  reminders: number
+  libraryAssociations: number
+}

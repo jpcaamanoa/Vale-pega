@@ -70,6 +70,14 @@ pub fn restore_library_resource(id: String, state: State<'_, SharedVaultSession>
     state.with_connection(|conn| library::restore_resource(conn, &id)).map_err(|_| LOCKED_MESSAGE.to_string())?.map_err(|e| e.to_string())
 }
 
+/// Borrado físico e irreversible — solo alcanzable desde "Archivados" en el frontend. Ver
+/// `services::library::hard_delete_resource` para el modelo completo de validaciones/atomicidad.
+#[tauri::command]
+pub fn hard_delete_library_resource(app: AppHandle, id: String, state: State<'_, SharedVaultSession>) -> Result<(), String> {
+    let root = files_root(&app)?;
+    library::hard_delete_resource(&state, &root, &id).map_err(|e| e.to_string())
+}
+
 /// Estrategia híbrida por MIME (mismo criterio que `commands::documents::get_document_data_url`)
 /// — cubre imágenes: descifra en memoria y entrega un `data:` URL, sin escribir ningún archivo
 /// temporal en disco.

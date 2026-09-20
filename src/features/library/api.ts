@@ -29,6 +29,11 @@ export const libraryApi = {
 
   restore: (id: string) => invoke<LibraryResourceSummary>('restore_library_resource', { id }),
 
+  /** Borrado físico e irreversible — solo alcanzable desde "Archivados". Exige que el recurso ya
+   * esté archivado y que no tenga ninguna asociación con un paciente (a diferencia de `archive`,
+   * aquí no existe un `force`: hay que desasociar primero). */
+  hardDelete: (id: string) => invoke<void>('hard_delete_library_resource', { id }),
+
   /** Solo para imágenes — descifra en memoria y entrega un `data:` URL, sin tocar disco. */
   getDataUrl: (id: string) => invoke<string>('get_library_resource_data_url', { id }),
 

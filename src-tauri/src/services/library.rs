@@ -91,6 +91,14 @@ pub enum LibraryError {
     /// que se llame de nuevo con `force: true` tras mostrar esta advertencia a la usuaria. Nunca
     /// se borran asociaciones en silencio.
     LinkedToPatients(usize),
+    /// `hard_delete_resource` exige que el recurso esté archivado primero — nunca se ofrece
+    /// "Eliminar permanentemente" como acción directa desde un recurso activo.
+    MustBeArchivedFirst,
+    /// Mismo caso que `LinkedToPatients`, pero para `hard_delete_resource`: a diferencia de
+    /// `archive_resource`, aquí **no existe** un `force` que lo pase por alto — un borrado físico
+    /// nunca puede dejar asociaciones apuntando a un recurso que ya no existe. La usuaria debe
+    /// desvincular el recurso de cada paciente antes de poder eliminarlo.
+    LinkedToPatientsBlocksHardDelete(usize),
     SourceFileNotFound,
     SourceFileEmpty,
     SourceFileTooLarge,
@@ -109,6 +117,8 @@ impl fmt::Display for LibraryError {
             LibraryError::PatientNotFound => write!(f, "paciente no encontrado"),
             LibraryError::PatientArchived => write!(f, "no se puede asociar un recurso a un paciente archivado"),
             LibraryError::LinkedToPatients(n) => write!(f, "este recurso está asociado a {n} paciente(s) — confirma para archivarlo de todas formas"),
+            LibraryError::MustBeArchivedFirst => write!(f, "el recurso debe estar archivado antes de poder eliminarse permanentemente"),
+            LibraryError::LinkedToPatientsBlocksHardDelete(n) => write!(f, "este recurso está asociado a {n} paciente(s). Quita esas asociaciones antes de eliminarlo permanentemente."),
             LibraryError::SourceFileNotFound => write!(f, "no se pudo leer el archivo de origen"),
             LibraryError::SourceFileEmpty => write!(f, "el archivo de origen está vacío"),
             LibraryError::SourceFileTooLarge => write!(f, "el archivo supera el tamaño máximo permitido (50 MB)"),
@@ -388,6 +398,69 @@ pub fn restore_resource(conn: &Connection, id: &str) -> Result<LibraryResourceSu
         return Err(LibraryError::NotFound);
     }
     get_resource(conn, id)
+}
+
+/// Borrado físico e irreversible de un recurso — distinto de `archive_resource` (reversible). Solo
+/// alcanzable desde "Archivados": exige que el recurso ya esté archivado (`MustBeArchivedFirst`
+/// si no) y que no tenga ninguna asociación viva con un paciente (`LinkedToPatientsBlocksHardDelete`
+/// si tiene alguna — a diferencia de `archive_resource`, aquí no existe un `force` que lo pase
+/// por alto: un borrado físico nunca puede dejar una fila de `library_resource_patients`
+/// apuntando a un recurso que ya no existe).
+///
+/// Modelo de atomicidad (ver CLAUDE.md regla 2 y la sección "Atomicidad" del pedido de esta
+/// fase): la fila de `documents` (si el recurso tenía un archivo) y la fila de `library_resources`
+/// se borran dentro de una única transacción SQL (`BEGIN IMMEDIATE`/`COMMIT`, con `ROLLBACK`
+/// explícito ante cualquier error) — nunca queda un estado a medias en la base. El ciphertext del
+/// archivo en disco se borra **después** de que la transacción confirma, en modo best-effort: si
+/// ese borrado de archivo falla (permisos, etc.), el error se descarta silenciosamente y la base
+/// queda de todas formas 100% consistente (ninguna fila apunta ya al archivo) — el resultado en el
+/// peor caso es un ciphertext huérfano en disco, nunca una fila huérfana en la base ni un estado
+/// parcial. Ese archivo huérfano es exactamente la clase de discrepancia que ya detecta (sin
+/// borrar nada por sí solo) `services::documents::find_orphan_storage_paths`.
+pub fn hard_delete_resource(session: &VaultSession, files_root: &Path, id: &str) -> Result<(), LibraryError> {
+    let storage_path_to_delete: Option<String> = session
+        .with_connection(|conn| -> Result<Option<String>, LibraryError> {
+            let resource = library::find_by_id(conn, id)?.ok_or(LibraryError::NotFound)?;
+            if resource.deleted_at.is_none() {
+                return Err(LibraryError::MustBeArchivedFirst);
+            }
+            let linked = library::count_patients_for_resource(conn, id)?;
+            if linked > 0 {
+                return Err(LibraryError::LinkedToPatientsBlocksHardDelete(linked as usize));
+            }
+
+            let storage_path = match &resource.file_document_id {
+                Some(doc_id) => crate::repositories::documents::find_document_by_id(conn, doc_id)?.map(|d| d.storage_path),
+                None => None,
+            };
+
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let result: rusqlite::Result<()> = (|| {
+                if let Some(doc_id) = &resource.file_document_id {
+                    crate::repositories::documents::delete_document_row(conn, doc_id)?;
+                }
+                library::hard_delete(conn, id)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(storage_path)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(LibraryError::Database(e))
+                }
+            }
+        })
+        .map_err(|_locked| LibraryError::VaultLocked)??;
+
+    if let Some(storage_path) = storage_path_to_delete {
+        if let Ok(abs_path) = document_crypto::resolve_within_files_root(files_root, &storage_path) {
+            let _ = std::fs::remove_file(&abs_path);
+        }
+    }
+    Ok(())
 }
 
 /// Descifra el contenido del archivo adjunto de un recurso (para abrir/previsualizar) — igual
@@ -675,5 +748,99 @@ mod tests {
 
         let patients = session.with_connection(|conn| list_patients_for_resource(conn, &resource.id)).unwrap().unwrap();
         assert_eq!(patients.len(), 1, "archivar el recurso no debe ocultar sus asociaciones ya existentes");
+    }
+
+    // ---- hard_delete_resource (FASE 2A) ----
+
+    #[test]
+    fn hard_delete_rejects_a_resource_that_is_not_archived() {
+        let (session, files_root, _sources_dir) = test_session("hard-delete-not-archived");
+        let resource = create_resource(&session, &files_root, minimal_input("Activo")).unwrap();
+        let err = hard_delete_resource(&session, &files_root, &resource.id).unwrap_err();
+        assert!(matches!(err, LibraryError::MustBeArchivedFirst));
+        // nunca borra nada si rechaza
+        assert!(session.with_connection(|conn| get_resource(conn, &resource.id)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn hard_delete_blocks_when_still_linked_to_a_patient_with_no_force_option() {
+        let (session, files_root, _sources_dir) = test_session("hard-delete-blocked-linked");
+        let resource = create_resource(&session, &files_root, minimal_input("Con vínculo")).unwrap();
+        let patient_id = create_test_patient(&session, "Paciente Uno");
+        session.with_connection(|conn| link_resource_to_patient(conn, &resource.id, &patient_id)).unwrap().unwrap();
+        session.with_connection(|conn| archive_resource(conn, &resource.id, true)).unwrap().unwrap();
+
+        let err = hard_delete_resource(&session, &files_root, &resource.id).unwrap_err();
+        assert!(matches!(err, LibraryError::LinkedToPatientsBlocksHardDelete(1)));
+        // el recurso archivado sigue existiendo, y el vínculo también
+        let linked = session.with_connection(|conn| library::count_patients_for_resource(conn, &resource.id)).unwrap().unwrap();
+        assert_eq!(linked, 1);
+    }
+
+    #[test]
+    fn hard_delete_succeeds_after_unlinking_from_every_patient() {
+        let (session, files_root, _sources_dir) = test_session("hard-delete-after-unlink");
+        let resource = create_resource(&session, &files_root, minimal_input("Recurso")).unwrap();
+        let patient_id = create_test_patient(&session, "Paciente Uno");
+        session.with_connection(|conn| link_resource_to_patient(conn, &resource.id, &patient_id)).unwrap().unwrap();
+        session.with_connection(|conn| archive_resource(conn, &resource.id, true)).unwrap().unwrap();
+        session.with_connection(|conn| unlink_resource_from_patient(conn, &resource.id, &patient_id)).unwrap().unwrap();
+
+        hard_delete_resource(&session, &files_root, &resource.id).unwrap();
+        let err = session.with_connection(|conn| get_resource(conn, &resource.id)).unwrap().unwrap_err();
+        assert!(matches!(err, LibraryError::NotFound));
+    }
+
+    #[test]
+    fn hard_delete_removes_a_resource_without_a_file() {
+        let (session, files_root, _sources_dir) = test_session("hard-delete-no-file");
+        let resource = create_resource(&session, &files_root, minimal_input("Solo enlace")).unwrap();
+        session.with_connection(|conn| archive_resource(conn, &resource.id, false)).unwrap().unwrap();
+
+        hard_delete_resource(&session, &files_root, &resource.id).unwrap();
+        let err = session.with_connection(|conn| get_resource(conn, &resource.id)).unwrap().unwrap_err();
+        assert!(matches!(err, LibraryError::NotFound));
+    }
+
+    #[test]
+    fn hard_delete_removes_a_resource_with_a_file_and_its_ciphertext_from_disk() {
+        let (session, files_root, sources_dir) = test_session("hard-delete-with-file");
+        let source_path = write_source_file(&sources_dir, "guia.txt", b"contenido ficticio");
+        let mut input = minimal_input("Con archivo");
+        input.source_path = Some(source_path);
+        let resource = create_resource(&session, &files_root, input).unwrap();
+        let document_id = resource.file_document_id.clone().unwrap();
+
+        let abs_path = session
+            .with_connection(|conn| crate::repositories::documents::find_document_by_id(conn, &document_id))
+            .unwrap()
+            .unwrap()
+            .map(|d| document_crypto::resolve_within_files_root(&files_root, &d.storage_path).unwrap())
+            .unwrap();
+        assert!(abs_path.exists(), "el ciphertext debe existir antes de borrar");
+
+        session.with_connection(|conn| archive_resource(conn, &resource.id, false)).unwrap().unwrap();
+        hard_delete_resource(&session, &files_root, &resource.id).unwrap();
+
+        assert!(!abs_path.exists(), "el ciphertext debe borrarse del disco");
+        let err = session.with_connection(|conn| get_resource(conn, &resource.id)).unwrap().unwrap_err();
+        assert!(matches!(err, LibraryError::NotFound));
+        // ninguna fila huérfana en documents apuntando al recurso borrado
+        let doc_gone = session.with_connection(|conn| crate::repositories::documents::find_document_by_id(conn, &document_id)).unwrap().unwrap();
+        assert!(doc_gone.is_none());
+    }
+
+    #[test]
+    fn hard_delete_never_touches_other_resources() {
+        let (session, files_root, _sources_dir) = test_session("hard-delete-isolated");
+        let survivor = create_resource(&session, &files_root, minimal_input("Sobrevive")).unwrap();
+        let victim = create_resource(&session, &files_root, minimal_input("Se borra")).unwrap();
+        session.with_connection(|conn| archive_resource(conn, &victim.id, false)).unwrap().unwrap();
+
+        hard_delete_resource(&session, &files_root, &victim.id).unwrap();
+
+        let active = session.with_connection(list_active_resources).unwrap().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, survivor.id);
     }
 }

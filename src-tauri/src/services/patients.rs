@@ -4,12 +4,15 @@
 //! de llegar aquí (`security::session::VaultSession::with_connection`).
 
 use std::fmt;
+use std::path::Path;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::geo;
-use crate::repositories::patients::{self, NewPatientRow, Patient, PatientSummary, PatientUpdateRow};
+use crate::repositories::patients::{self, NewPatientRow, Patient, PatientHardDeleteScope, PatientSummary, PatientUpdateRow};
+use crate::security::VaultSession;
+use crate::services::document_crypto;
 
 use super::rut::{self, RutError};
 
@@ -142,6 +145,12 @@ pub enum PatientError {
     Validation(PatientValidationError),
     NotFound,
     Database(rusqlite::Error),
+    /// `hard_delete_patient` exige que el paciente esté archivado primero — nunca se ofrece
+    /// "Eliminar permanentemente" como acción directa desde un paciente activo.
+    MustBeArchivedFirst,
+    /// Solo alcanzable desde `hard_delete_patient` (las demás funciones de este módulo no tocan
+    /// `VaultSession` — ver el comentario de esa función para por qué esta es la excepción).
+    VaultLocked,
 }
 impl fmt::Display for PatientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -151,6 +160,8 @@ impl fmt::Display for PatientError {
             // Nunca se interpola el error de rusqlite con datos de la fila
             // (podría incluir valores) — solo un mensaje genérico técnico.
             PatientError::Database(_) => write!(f, "error interno al acceder a la base de datos"),
+            PatientError::MustBeArchivedFirst => write!(f, "el paciente debe estar archivado antes de poder eliminarse permanentemente"),
+            PatientError::VaultLocked => write!(f, "el vault está bloqueado"),
         }
     }
 }
@@ -409,6 +420,41 @@ pub fn restore_patient(conn: &Connection, id: &str) -> Result<(), PatientError> 
     }
 }
 
+/// Resumen de solo lectura de todo lo que se perdería al eliminar permanentemente este paciente —
+/// para el modal de confirmación del frontend (FASE 2B). Nunca borra nada.
+pub fn hard_delete_scope(conn: &Connection, id: &str) -> Result<PatientHardDeleteScope, PatientError> {
+    patients::find_by_id(conn, id)?.ok_or(PatientError::NotFound)?;
+    Ok(patients::compute_hard_delete_scope(conn, id)?)
+}
+
+/// Borrado físico e irreversible del paciente y de todo lo que le pertenece exclusivamente (ver
+/// `repositories::patients::hard_delete` para el inventario completo de tablas y el orden de
+/// borrado). Excepción deliberada a la regla del encabezado de este archivo ("no sabe nada de
+/// `VaultSession`"): a diferencia del resto de este módulo, este borrado también debe eliminar
+/// los archivos cifrados de los documentos privados del paciente del disco — mismo motivo y mismo
+/// patrón ya usado por `services::library::hard_delete_resource`.
+///
+/// Exige que el paciente esté ya archivado (`MustBeArchivedFirst` si no) — nunca se ofrece
+/// "Eliminar permanentemente" como acción directa desde un paciente activo.
+pub fn hard_delete_patient(session: &VaultSession, files_root: &Path, id: &str) -> Result<(), PatientError> {
+    let storage_paths: Vec<String> = session
+        .with_connection(|conn| -> Result<Vec<String>, PatientError> {
+            let patient = patients::find_by_id(conn, id)?.ok_or(PatientError::NotFound)?;
+            if patient.deleted_at.is_none() {
+                return Err(PatientError::MustBeArchivedFirst);
+            }
+            Ok(patients::hard_delete(conn, id)?)
+        })
+        .map_err(|_locked| PatientError::VaultLocked)??;
+
+    for storage_path in storage_paths {
+        if let Ok(abs_path) = document_crypto::resolve_within_files_root(files_root, &storage_path) {
+            let _ = std::fs::remove_file(&abs_path);
+        }
+    }
+    Ok(())
+}
+
 #[allow(dead_code)] // se usa desde los tests de este módulo para inspeccionar un registro eliminado
 pub fn get_patient_including_deleted(conn: &Connection, id: &str) -> Result<Patient, PatientError> {
     patients::find_by_id(conn, id)?.ok_or(PatientError::NotFound)
@@ -509,6 +555,24 @@ mod tests {
         let mut conn = open_vault(&dir.join("vault.db"), &key).unwrap();
         run_migrations(&mut conn).unwrap();
         conn
+    }
+
+    /// Sesión real desbloqueada (no solo una `Connection` cruda) — necesaria para probar
+    /// `hard_delete_patient`, que también borra archivos del disco vía `VaultSession`.
+    fn test_session(name: &str) -> (VaultSession, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("cc-patients-svc-test-{}-{}", std::process::id(), name));
+        if base.exists() {
+            std::fs::remove_dir_all(&base).unwrap();
+        }
+        let vault_dir = base.join("vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let files_root = vault_dir.join("files");
+        std::fs::create_dir_all(&files_root).unwrap();
+
+        let session = VaultSession::new(&vault_dir);
+        session.begin_creation("una-contraseña-de-prueba-larga-1").unwrap();
+        session.confirm_creation().unwrap();
+        (session, files_root)
     }
 
     fn minimal_input(name: &str) -> PatientInput {
@@ -1087,5 +1151,202 @@ mod tests {
         assert_eq!(stats.without_location, 0);
         assert!(stats.by_region.is_empty());
         assert!(stats.by_commune.is_empty());
+    }
+
+    // ---- hard_delete_patient / hard_delete_scope (FASE 2B) ----
+
+    #[test]
+    fn hard_delete_rejects_an_active_patient() {
+        let (session, files_root) = test_session("hard-delete-active-rejected");
+        let id = session.with_connection(|conn| create_patient(conn, minimal_input("Paciente Activo"))).unwrap().unwrap().id;
+        let err = hard_delete_patient(&session, &files_root, &id).unwrap_err();
+        assert!(matches!(err, PatientError::MustBeArchivedFirst));
+        // nunca borra nada si rechaza
+        assert!(session.with_connection(|conn| get_patient(conn, &id)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn hard_delete_removes_a_patient_with_no_related_data_at_all() {
+        let (session, files_root) = test_session("hard-delete-empty-patient");
+        let id = session.with_connection(|conn| create_patient(conn, minimal_input("Paciente Vacío"))).unwrap().unwrap().id;
+        session.with_connection(|conn| archive_patient(conn, &id)).unwrap().unwrap();
+
+        hard_delete_patient(&session, &files_root, &id).unwrap();
+        let err = session.with_connection(|conn| get_patient(conn, &id)).unwrap().unwrap_err();
+        assert!(matches!(err, PatientError::NotFound));
+    }
+
+    /// El caso más exigente: un paciente con al menos una fila en cada tabla relacionada
+    /// auditada (ver `docs/patients-vertical.md`), incluido un documento propio con archivo real
+    /// en disco y una asociación de Biblioteca. Verifica en un solo test: (a) todas las tablas
+    /// quedan en cero filas para este paciente, (b) el archivo cifrado del documento se borra del
+    /// disco, (c) el recurso global de Biblioteca sobrevive intacto (solo se borra la relación),
+    /// y (d) un segundo paciente de control con su propia sesión no se ve afectado en absoluto.
+    #[test]
+    fn hard_delete_removes_every_related_row_across_every_audited_table_and_nothing_else() {
+        let (session, files_root) = test_session("hard-delete-kitchen-sink");
+
+        let patient_id = session.with_connection(|conn| create_patient(conn, minimal_input("Paciente Completo"))).unwrap().unwrap().id;
+        let control_id = session.with_connection(|conn| create_patient(conn, minimal_input("Paciente Control"))).unwrap().unwrap().id;
+
+        // Documento propio con archivo real en disco.
+        let document_id = uuid::Uuid::new_v4();
+        let storage_path = crate::services::document_crypto::opaque_storage_path(document_id);
+        let abs_path = crate::services::document_crypto::resolve_within_files_root(&files_root, &storage_path).unwrap();
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&abs_path, b"ciphertext ficticio").unwrap();
+
+        // Recurso de Biblioteca global, asociado al paciente — debe sobrevivir.
+        let resource = crate::services::library::create_resource(
+            &session,
+            &files_root,
+            crate::services::library::NewLibraryResourceInput { title: "Guía ficticia".to_string(), resource_type: None, author: None, source_url: None, summary: None, source_path: None, mime_type: None },
+        )
+        .unwrap();
+
+        session
+            .with_connection(|conn| -> rusqlite::Result<()> {
+                conn.execute("INSERT INTO patient_clinical_profile (patient_id, presenting_problem) VALUES (?1, 'motivo ficticio')", [&patient_id])?;
+
+                conn.execute(
+                    "INSERT INTO case_formulations (id, patient_id, title) VALUES ('cf1', ?1, 'Formulación ficticia')",
+                    [&patient_id],
+                )?;
+                conn.execute("INSERT INTO formulation_versions (id, formulation_id, version_number) VALUES ('fv1', 'cf1', 1)", [])?;
+                conn.execute(
+                    "INSERT INTO formulation_nodes (id, formulation_version_id, node_type, label, position_x, position_y) VALUES ('n1', 'fv1', 'factor', 'Nodo 1', 0, 0)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO formulation_nodes (id, formulation_version_id, node_type, label, position_x, position_y) VALUES ('n2', 'fv1', 'factor', 'Nodo 2', 1, 1)",
+                    [],
+                )?;
+                conn.execute("INSERT INTO formulation_edges (id, formulation_version_id, source_node_id, target_node_id) VALUES ('e1', 'fv1', 'n1', 'n2')", [])?;
+
+                conn.execute(
+                    "INSERT INTO treatment_episodes (id, patient_id, started_at, status) VALUES ('te1', ?1, '2026-01-01', 'activo')",
+                    [&patient_id],
+                )?;
+                conn.execute("INSERT INTO episode_clinical_profile (episode_id, presenting_problem) VALUES ('te1', 'motivo')", [])?;
+                conn.execute(
+                    "INSERT INTO episode_closures (id, episode_id, closed_at, reason, outcome) VALUES ('ec1', 'te1', '2026-02-01', 'alta', 'objetivos_logrados')",
+                    [],
+                )?;
+
+                conn.execute(
+                    "INSERT INTO sessions (id, patient_id, session_date, episode_id) VALUES ('s1', ?1, '2026-01-05', 'te1')",
+                    [&patient_id],
+                )?;
+                conn.execute("INSERT INTO session_notes (id, session_id, content) VALUES ('sn1', 's1', 'nota ficticia')", [])?;
+
+                conn.execute(
+                    "INSERT INTO therapeutic_goals (id, patient_id, episode_id, title) VALUES ('g1', ?1, 'te1', 'Objetivo ficticio')",
+                    [&patient_id],
+                )?;
+                conn.execute("INSERT INTO goal_indicators (id, goal_id, description) VALUES ('gi1', 'g1', 'indicador ficticio')", [])?;
+                conn.execute("INSERT INTO goal_interventions (id, goal_id, description) VALUES ('gv1', 'g1', 'intervención ficticia')", [])?;
+                conn.execute("INSERT INTO session_goals (session_id, goal_id) VALUES ('s1', 'g1')", [])?;
+
+                conn.execute("INSERT INTO assessment_instruments (id, name) VALUES ('ai1', 'Instrumento Ficticio')", [])?;
+                conn.execute(
+                    "INSERT INTO assessment_administrations (id, patient_id, instrument_id, administered_at) VALUES ('aa1', ?1, 'ai1', '2026-01-10')",
+                    [&patient_id],
+                )?;
+
+                conn.execute("INSERT INTO payments (id, patient_id, amount) VALUES ('pay1', ?1, 10000)", [&patient_id])?;
+                conn.execute("INSERT INTO patient_prep_notes (id, patient_id, content) VALUES ('ppn1', ?1, 'nota de preparación ficticia')", [&patient_id])?;
+                conn.execute("INSERT INTO therapy_tasks (id, patient_id, description) VALUES ('tt1', ?1, 'tarea ficticia')", [&patient_id])?;
+
+                conn.execute("INSERT INTO safety_plans (id, patient_id, version, status) VALUES ('sp1', ?1, 1, 'borrador')", [&patient_id])?;
+                conn.execute("INSERT INTO safety_plan_contacts (id, safety_plan_id, contact_type, name) VALUES ('spc1', 'sp1', 'support_person', 'Contacto Ficticio')", [])?;
+                conn.execute("INSERT INTO safety_plan_list_items (id, safety_plan_id, item_type, content) VALUES ('spli1', 'sp1', 'warning_sign', 'Señal ficticia')", [])?;
+
+                conn.execute(
+                    "INSERT INTO documents (id, patient_id, original_filename, mime_type, size_bytes, sha256_plaintext, storage_path, wrapped_file_dek, wrap_nonce) \
+                     VALUES (?1, ?2, 'informe.pdf', 'application/pdf', 20, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', ?3, 'a2V5', 'bm9uY2U=')",
+                    rusqlite::params![document_id.to_string(), patient_id, storage_path],
+                )?;
+
+                conn.execute(
+                    "INSERT INTO appointments (id, patient_id, title, starts_at, ends_at) VALUES ('apt1', ?1, 'Cita ficticia', '2026-01-01T10:00:00Z', '2026-01-01T11:00:00Z')",
+                    [&patient_id],
+                )?;
+                conn.execute("INSERT INTO reminders (id, patient_id, title) VALUES ('rem1', ?1, 'Recordatorio ficticio')", [&patient_id])?;
+
+                conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES (?1, ?2)", rusqlite::params![resource.id, patient_id])?;
+
+                // Datos del paciente de control — deben sobrevivir intactos.
+                conn.execute("INSERT INTO sessions (id, patient_id, session_date) VALUES ('s-control', ?1, '2026-01-05')", [&control_id])?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        // El resumen de alcance ve todo lo insertado.
+        let scope = session.with_connection(|conn| hard_delete_scope(conn, &patient_id)).unwrap().unwrap();
+        assert!(scope.has_clinical_profile);
+        assert_eq!(scope.sessions, 1);
+        assert_eq!(scope.case_formulations, 1);
+        assert_eq!(scope.therapeutic_goals, 1);
+        assert_eq!(scope.assessment_administrations, 1);
+        assert_eq!(scope.payments, 1);
+        assert_eq!(scope.treatment_episodes, 1);
+        assert_eq!(scope.safety_plans, 1);
+        assert_eq!(scope.documents, 1);
+        assert_eq!(scope.appointments, 1);
+        assert_eq!(scope.reminders, 1);
+        assert_eq!(scope.library_associations, 1);
+
+        session.with_connection(|conn| archive_patient(conn, &patient_id)).unwrap().unwrap();
+        hard_delete_patient(&session, &files_root, &patient_id).unwrap();
+
+        // El paciente en sí y cada tabla relacionada quedan en cero para este id.
+        let err = session.with_connection(|conn| get_patient(conn, &patient_id)).unwrap().unwrap_err();
+        assert!(matches!(err, PatientError::NotFound));
+
+        session
+            .with_connection(|conn| -> rusqlite::Result<()> {
+                for (table, column) in [
+                    ("patient_clinical_profile", "patient_id"),
+                    ("case_formulations", "patient_id"),
+                    ("treatment_episodes", "patient_id"),
+                    ("sessions", "patient_id"),
+                    ("therapeutic_goals", "patient_id"),
+                    ("assessment_administrations", "patient_id"),
+                    ("payments", "patient_id"),
+                    ("patient_prep_notes", "patient_id"),
+                    ("therapy_tasks", "patient_id"),
+                    ("safety_plans", "patient_id"),
+                    ("documents", "patient_id"),
+                    ("appointments", "patient_id"),
+                    ("reminders", "patient_id"),
+                    ("library_resource_patients", "patient_id"),
+                ] {
+                    let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"), [&patient_id], |r| r.get(0))?;
+                    assert_eq!(count, 0, "{table} debería quedar en cero filas para el paciente eliminado");
+                }
+                for table in ["formulation_versions", "formulation_nodes", "formulation_edges", "episode_clinical_profile", "episode_closures", "session_notes", "goal_indicators", "goal_interventions", "session_goals", "safety_plan_contacts", "safety_plan_list_items"] {
+                    let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+                    assert_eq!(count, 0, "{table} (hoja transitiva) debería quedar vacía");
+                }
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        // El ciphertext del documento del paciente se borró del disco — ningún archivo huérfano.
+        assert!(!abs_path.exists(), "el ciphertext del documento del paciente debe borrarse");
+
+        // El recurso global de Biblioteca sobrevive intacto — solo se borró la relación.
+        let survives = session.with_connection(|conn| crate::services::library::get_resource(conn, &resource.id)).unwrap();
+        assert!(survives.is_ok(), "el recurso global de Biblioteca nunca debe borrarse al eliminar un paciente");
+
+        // El paciente de control y su sesión no se ven afectados en absoluto.
+        assert!(session.with_connection(|conn| get_patient(conn, &control_id)).unwrap().is_ok());
+        let control_sessions: i64 = session
+            .with_connection(|conn| conn.query_row("SELECT COUNT(*) FROM sessions WHERE patient_id = ?1", [&control_id], |r| r.get(0)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(control_sessions, 1, "el paciente de control no debe verse afectado");
     }
 }

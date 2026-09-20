@@ -404,3 +404,86 @@ Ninguna regla de "detenerse" de `CLAUDE.md` se activó: sin cambio de
 esquema, sin migración, sin dependencias nuevas, sin pérdida de datos —
 una corrección de validación en la capa de servicio, ya reforzada también
 en el frontend.
+
+## Borrado permanente de pacientes (FASE 2B, autorizada explícitamente)
+
+Hasta esta fase, "Archivar" (`deleted_at`, reversible) era la única operación de "eliminar"
+disponible — no existía ningún `hard_delete`/`DELETE FROM patients` en todo el código (ver
+auditoría §C.2 del informe post-Fase 19). Esta fase agrega un borrado físico e irreversible,
+explícitamente separado de "Archivar" y protegido por varias capas.
+
+### Requisito: el paciente debe estar ya archivado
+
+`services::patients::hard_delete_patient` rechaza con `PatientError::MustBeArchivedFirst`
+cualquier intento sobre un paciente con `deleted_at IS NULL`. El frontend nunca ofrece "Eliminar
+permanentemente" junto al botón "Archivar" del paciente activo — solo aparece en la ficha de un
+paciente ya archivado, junto a "Restaurar".
+
+### Auditoría completa de tablas relacionadas y orden de borrado
+
+Se auditó el esquema real completo (no la lista mencionada en el informe anterior, verificada
+contra `db::migrations`) para encontrar **todas** las tablas con una fila que pertenece
+exclusivamente a un paciente, directa o transitivamente:
+
+| Tabla | FK a `patients` | Dependencia transitiva |
+| --- | --- | --- |
+| `patient_clinical_profile` | `RESTRICT` (1:1) | — |
+| `sessions` | `RESTRICT` | `session_notes` (`RESTRICT` desde `sessions`), `session_goals` (`CASCADE`) |
+| `case_formulations` | `RESTRICT` | `formulation_versions` (`CASCADE`) → `formulation_nodes`/`formulation_edges` (`CASCADE`) |
+| `therapeutic_goals` | `RESTRICT` | `goal_indicators`/`goal_interventions` (`CASCADE`), `session_goals` (`CASCADE`) |
+| `assessment_administrations` | `RESTRICT` | — |
+| `payments` | `RESTRICT` | — |
+| `patient_prep_notes` | `RESTRICT` | — |
+| `therapy_tasks` | `RESTRICT` | — |
+| `treatment_episodes` | `RESTRICT` | `episode_clinical_profile` (`RESTRICT`, 1:1), `episode_closures` (`RESTRICT`) |
+| `safety_plans` | `RESTRICT` | `safety_plan_contacts`/`safety_plan_list_items` (`CASCADE`) |
+| `documents` (propios) | `SET NULL` | — (archivo cifrado en disco, fuera de SQL) |
+| `library_resource_patients` | `CASCADE` | — (nunca `library_resources` en sí) |
+| `appointments` | `SET NULL` | — |
+| `reminders` | `SET NULL` | — |
+
+Documentado explícitamente porque **no se confía en que SQLite complete el trabajo por sí solo**
+vía los `ON DELETE CASCADE` ya declarados (instrucción explícita de la usuaria): la operación real
+(`repositories::patients::hard_delete`) borra cada tabla con su propio `DELETE FROM` explícito, en
+un orden de hojas-hacia-raíz que satisface manualmente cada `RESTRICT`, sin depender de ningún
+`CASCADE` implícito ni siquiera en las tablas que ya lo tienen declarado. `library_resources` (el
+recurso global) **nunca** se toca — solo `library_resource_patients`, la relación con ese paciente
+en particular; el mismo criterio ya establecido para "Archivar" en `docs/library.md` se extiende
+aquí también al borrado físico.
+
+### Atomicidad
+
+Toda la secuencia de `DELETE` corre dentro de una única transacción SQL manual (`BEGIN IMMEDIATE`
+… `COMMIT`, con `ROLLBACK` explícito ante cualquier error) — la base de datos nunca queda a medias.
+Los `storage_path` de los documentos propios del paciente se leen **antes** de la transacción y se
+devuelven al llamador; los archivos cifrados correspondientes se borran del disco **después** de
+que la transacción confirma, en modo best-effort (`let _ = std::fs::remove_file(...)`): si ese
+borrado de archivo falla, la base ya quedó 100% consistente (ninguna fila apunta a un archivo
+inexistente) — el peor caso es un ciphertext huérfano en disco, nunca una fila huérfana en la base
+ni un estado a medias. Mismo modelo exacto que `services::library::hard_delete_resource` (ver
+`docs/library.md`).
+
+### Resumen del alcance antes de confirmar
+
+`services::patients::hard_delete_scope`/`repositories::patients::compute_hard_delete_scope` son
+funciones de solo lectura (nunca borran nada) que cuentan filas en cada tabla relacionada — el
+frontend las usa para mostrar "Se eliminará también: N sesiones, N formulaciones…" en el modal de
+confirmación, antes de exigir escribir "ELIMINAR". Si el recurso de Biblioteca sigue asociado, el
+modal aclara explícitamente que solo se quita la asociación, nunca el recurso global.
+
+### Advertencia de conservación
+
+El modal muestra, sin afirmar cumplimiento de ninguna legislación específica ni inventar plazos:
+"Los registros clínicos pueden estar sujetos a obligaciones de conservación. Verifica los
+requisitos aplicables antes de eliminarlos permanentemente." — advertencia neutral, la decisión
+final es siempre de la profesional.
+
+### Tests
+
+`services::patients::tests`: paciente activo rechaza (`MustBeArchivedFirst`); paciente archivado
+sin datos relacionados se borra limpio; y un test exhaustivo (`hard_delete_removes_every_related_row_across_every_audited_table_and_nothing_else`)
+que siembra una fila en **cada** tabla de la auditoría (incluido un documento con archivo real en
+disco y una asociación de Biblioteca), ejecuta el borrado real vía `hard_delete_patient`, y verifica:
+cero filas restantes en cada tabla para ese paciente, el ciphertext borrado del disco, el recurso
+global de Biblioteca intacto, y un segundo paciente de control con su propia sesión sin ningún
+efecto colateral.

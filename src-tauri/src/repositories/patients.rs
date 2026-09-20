@@ -286,6 +286,155 @@ pub fn restore(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     Ok(affected > 0)
 }
 
+// =========================================================================
+// Borrado permanente (fase de continuación post-FASE 1, autorizada
+// explícitamente) — ver `docs/patients-vertical.md` para el diseño completo,
+// el inventario de tablas auditado y el modelo de atomicidad.
+// =========================================================================
+
+/// Conteos de solo lectura de todo lo que se perdería al eliminar permanentemente un paciente —
+/// nunca borra nada. Es lo que el frontend muestra como "resumen del alcance" antes de pedir la
+/// confirmación escrita "ELIMINAR" (ver `services::patients::hard_delete_scope`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatientHardDeleteScope {
+    pub has_clinical_profile: bool,
+    pub sessions: i64,
+    pub case_formulations: i64,
+    pub therapeutic_goals: i64,
+    pub assessment_administrations: i64,
+    pub payments: i64,
+    pub treatment_episodes: i64,
+    pub safety_plans: i64,
+    pub documents: i64,
+    pub appointments: i64,
+    pub reminders: i64,
+    pub library_associations: i64,
+}
+
+fn count_where_patient(conn: &Connection, table: &str, patient_id: &str) -> rusqlite::Result<i64> {
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE patient_id = ?1"), params![patient_id], |r| r.get(0))
+}
+
+pub fn compute_hard_delete_scope(conn: &Connection, patient_id: &str) -> rusqlite::Result<PatientHardDeleteScope> {
+    Ok(PatientHardDeleteScope {
+        has_clinical_profile: count_where_patient(conn, "patient_clinical_profile", patient_id)? > 0,
+        sessions: count_where_patient(conn, "sessions", patient_id)?,
+        case_formulations: count_where_patient(conn, "case_formulations", patient_id)?,
+        therapeutic_goals: count_where_patient(conn, "therapeutic_goals", patient_id)?,
+        assessment_administrations: count_where_patient(conn, "assessment_administrations", patient_id)?,
+        payments: count_where_patient(conn, "payments", patient_id)?,
+        treatment_episodes: count_where_patient(conn, "treatment_episodes", patient_id)?,
+        safety_plans: count_where_patient(conn, "safety_plans", patient_id)?,
+        documents: count_where_patient(conn, "documents", patient_id)?,
+        appointments: count_where_patient(conn, "appointments", patient_id)?,
+        reminders: count_where_patient(conn, "reminders", patient_id)?,
+        library_associations: count_where_patient(conn, "library_resource_patients", patient_id)?,
+    })
+}
+
+/// Borrado físico e irreversible de TODO lo que pertenece exclusivamente a este paciente. Nunca
+/// valida por sí sola que el paciente esté archivado — esa regla de negocio vive en
+/// `services::patients::hard_delete_patient`, que es la única llamadora real.
+///
+/// Deliberadamente explícito: cada tabla relacionada se borra con su propio `DELETE`, en el orden
+/// que exige la mezcla real de `ON DELETE RESTRICT`/`SET NULL`/`CASCADE` del esquema — nunca se
+/// depende de que SQLite complete el trabajo con un `ON DELETE CASCADE` implícito por sí solo,
+/// aunque varias de estas tablas ya lo tengan declarado (auditoría completa de FKs en
+/// `docs/patients-vertical.md`). Toda la función corre dentro de una única transacción SQL
+/// (`BEGIN IMMEDIATE` / `COMMIT`, con `ROLLBACK` explícito ante cualquier error) — nunca queda un
+/// estado a medias en la base.
+///
+/// Nunca toca `library_resources` — los recursos globales de Biblioteca sobreviven siempre;
+/// solo se borra `library_resource_patients`, la relación con este paciente en particular.
+///
+/// Devuelve los `storage_path` de los documentos privados del paciente que quedaron borrados de
+/// la base — es responsabilidad de quien llama (`services::patients::hard_delete_patient`) borrar
+/// esos archivos del disco **después** de que esta transacción confirme, igual modelo que
+/// `services::library::hard_delete_resource`.
+pub fn hard_delete(conn: &Connection, patient_id: &str) -> rusqlite::Result<Vec<String>> {
+    let storage_paths = crate::repositories::documents::list_storage_paths_by_patient(conn, patient_id)?;
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result: rusqlite::Result<()> = (|| {
+        // ---- Hojas de Formulación (dependen de formulation_versions, que depende de case_formulations) ----
+        conn.execute(
+            "DELETE FROM formulation_edges WHERE formulation_version_id IN (\
+                SELECT fv.id FROM formulation_versions fv JOIN case_formulations cf ON cf.id = fv.formulation_id \
+                WHERE cf.patient_id = ?1)",
+            params![patient_id],
+        )?;
+        conn.execute(
+            "DELETE FROM formulation_nodes WHERE formulation_version_id IN (\
+                SELECT fv.id FROM formulation_versions fv JOIN case_formulations cf ON cf.id = fv.formulation_id \
+                WHERE cf.patient_id = ?1)",
+            params![patient_id],
+        )?;
+        conn.execute(
+            "DELETE FROM formulation_versions WHERE formulation_id IN (SELECT id FROM case_formulations WHERE patient_id = ?1)",
+            params![patient_id],
+        )?;
+
+        // ---- Hojas de Objetivos terapéuticos ----
+        conn.execute("DELETE FROM goal_indicators WHERE goal_id IN (SELECT id FROM therapeutic_goals WHERE patient_id = ?1)", params![patient_id])?;
+        conn.execute("DELETE FROM goal_interventions WHERE goal_id IN (SELECT id FROM therapeutic_goals WHERE patient_id = ?1)", params![patient_id])?;
+        conn.execute(
+            "DELETE FROM session_goals WHERE session_id IN (SELECT id FROM sessions WHERE patient_id = ?1) \
+                OR goal_id IN (SELECT id FROM therapeutic_goals WHERE patient_id = ?1)",
+            params![patient_id],
+        )?;
+
+        // ---- Notas de sesión (RESTRICT desde sessions: deben borrarse antes) ----
+        conn.execute("DELETE FROM session_notes WHERE session_id IN (SELECT id FROM sessions WHERE patient_id = ?1)", params![patient_id])?;
+
+        // ---- Antecedentes y cierre de proceso (RESTRICT desde treatment_episodes: antes) ----
+        conn.execute("DELETE FROM episode_clinical_profile WHERE episode_id IN (SELECT id FROM treatment_episodes WHERE patient_id = ?1)", params![patient_id])?;
+        conn.execute("DELETE FROM episode_closures WHERE episode_id IN (SELECT id FROM treatment_episodes WHERE patient_id = ?1)", params![patient_id])?;
+
+        // ---- Contactos e ítems de lista del Plan de Seguridad ----
+        conn.execute("DELETE FROM safety_plan_contacts WHERE safety_plan_id IN (SELECT id FROM safety_plans WHERE patient_id = ?1)", params![patient_id])?;
+        conn.execute("DELETE FROM safety_plan_list_items WHERE safety_plan_id IN (SELECT id FROM safety_plans WHERE patient_id = ?1)", params![patient_id])?;
+
+        // ---- Tablas con patient_id directo, ya sin hijos pendientes ----
+        conn.execute("DELETE FROM therapy_tasks WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM patient_prep_notes WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM assessment_administrations WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM payments WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM therapeutic_goals WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM case_formulations WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM safety_plans WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM sessions WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM treatment_episodes WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM patient_clinical_profile WHERE patient_id = ?1", params![patient_id])?;
+
+        // ---- Documentos privados (las filas; los archivos en disco los borra quien llama) ----
+        conn.execute("DELETE FROM documents WHERE patient_id = ?1", params![patient_id])?;
+
+        // ---- Solo la relación con ESTE paciente — nunca library_resources ----
+        conn.execute("DELETE FROM library_resource_patients WHERE patient_id = ?1", params![patient_id])?;
+
+        // ---- Citas y recordatorios: SET NULL, no bloquean nada, pero un borrado deliberado del
+        // paciente tampoco debe dejarlos huérfanos sin sentido ----
+        conn.execute("DELETE FROM appointments WHERE patient_id = ?1", params![patient_id])?;
+        conn.execute("DELETE FROM reminders WHERE patient_id = ?1", params![patient_id])?;
+
+        // ---- La ficha en sí, al final: ya no queda ningún hijo RESTRICT vivo ----
+        conn.execute("DELETE FROM patients WHERE id = ?1", params![patient_id])?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(storage_paths)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 /// Un `(etiqueta, cantidad)` sin agrupar todavía — agrupar categorías con
 /// menos de tres pacientes en "Otras" es una decisión de negocio que vive en
 /// `services::patients::geographic_statistics`, no aquí.

@@ -267,6 +267,25 @@ pub fn list_all_storage_paths(conn: &Connection) -> rusqlite::Result<Vec<String>
     rows.collect()
 }
 
+/// `storage_path` de todos los documentos (propios) de un paciente, sin filtrar por
+/// `deleted_at` — uso exclusivo de `services::patients::hard_delete_patient`, que necesita saber
+/// qué ciphertexts borrar del disco antes de que las filas dejen de existir. Nunca usado por un
+/// flujo de solo-lectura normal.
+pub fn list_storage_paths_by_patient(conn: &Connection, patient_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT storage_path FROM documents WHERE patient_id = ?1")?;
+    let rows = stmt.query_map(params![patient_id], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Borrado físico de la fila — a diferencia de `archive_document` (reversible), esto es
+/// irreversible y de uso exclusivo de los flujos de hard-delete (`services::library::hard_delete_resource`,
+/// `services::patients::hard_delete_patient`), siempre dentro de una transacción que también borra
+/// el ciphertext del disco. Nunca alcanzable desde un comando normal de Documentos.
+pub fn delete_document_row(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let affected = conn.execute("DELETE FROM documents WHERE id = ?1", params![id])?;
+    Ok(affected > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
