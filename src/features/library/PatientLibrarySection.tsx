@@ -91,10 +91,17 @@ export function PatientLibrarySection({ patientId, patientArchived }: { patientI
   const [linkError, setLinkError] = useState<string | null>(null)
 
   const loadLinked = () => {
+    setError(null)
     libraryApi
       .listResourcesForPatient(patientId)
-      .then(setLinked)
-      .catch((err) => setError(typeof err === 'string' ? err : 'No se pudieron cargar los recursos asociados.'))
+      .then((all) => {
+        setLinked(all)
+        setError(null)
+      })
+      .catch((err) => {
+        setLinked(null)
+        setError(typeof err === 'string' ? err : 'No se pudo cargar esta sección. Intenta nuevamente.')
+      })
   }
 
   useEffect(loadLinked, [patientId])
@@ -129,8 +136,17 @@ export function PatientLibrarySection({ patientId, patientArchived }: { patientI
         asociarse a cualquier número de pacientes — nunca se duplica el archivo.
       </p>
 
-      {error && <p className="text-sm text-danger">{error}</p>}
-      {linked === null && <p className="text-sm text-muted-foreground">Cargando…</p>}
+      {error && (
+        <div className="flex flex-col gap-2">
+          <p className="text-sm text-danger">{error}</p>
+          <div>
+            <Button type="button" variant="secondary" onClick={loadLinked}>
+              Reintentar
+            </Button>
+          </div>
+        </div>
+      )}
+      {linked === null && !error && <p className="text-sm text-muted-foreground">Cargando…</p>}
       {linked !== null && linked.length === 0 && <p className="text-sm text-muted-foreground">Sin recursos asociados todavía.</p>}
       {linked !== null && linked.length > 0 && (
         <ul className="rounded-lg border border-border px-4">

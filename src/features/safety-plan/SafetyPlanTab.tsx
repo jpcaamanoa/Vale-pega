@@ -55,10 +55,14 @@ function ItemListEditor({ planId, itemType, addPlaceholder, emptyMessage }: { pl
   const [error, setError] = useState<string | null>(null)
 
   const load = () => {
+    setError(null)
     safetyPlanApi
       .listItems(planId)
       .then((all) => setItems(all.filter((i) => i.itemType === itemType)))
-      .catch((err) => setError(typeof err === 'string' ? err : 'No se pudo cargar la lista.'))
+      .catch((err) => {
+        setItems(null)
+        setError(typeof err === 'string' ? err : 'No se pudo cargar esta sección. Intenta nuevamente.')
+      })
   }
   useEffect(load, [planId, itemType])
 
@@ -100,6 +104,19 @@ function ItemListEditor({ planId, itemType, addPlaceholder, emptyMessage }: { pl
     } catch (err) {
       setError(typeof err === 'string' ? err : 'No se pudo eliminar.')
     }
+  }
+
+  if (items === null && error) {
+    return (
+      <div className="flex flex-col gap-2">
+        <p className="text-sm text-danger">{error}</p>
+        <div>
+          <Button type="button" variant="secondary" onClick={load}>
+            Reintentar
+          </Button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -334,10 +351,17 @@ function ContactsSection({
   const [error, setError] = useState<string | null>(null)
 
   const load = () => {
+    setError(null)
     safetyPlanApi
       .listContacts(planId)
-      .then(setContacts)
-      .catch((err) => setError(typeof err === 'string' ? err : 'No se pudieron cargar los contactos.'))
+      .then((all) => {
+        setContacts(all)
+        setError(null)
+      })
+      .catch((err) => {
+        setContacts(null)
+        setError(typeof err === 'string' ? err : 'No se pudo cargar esta sección. Intenta nuevamente.')
+      })
   }
   useEffect(load, [planId])
 
@@ -352,6 +376,19 @@ function ContactsSection({
     } catch (err) {
       setError(typeof err === 'string' ? err : 'No se pudo eliminar el contacto.')
     }
+  }
+
+  if (contacts === null && error) {
+    return (
+      <div className="flex flex-col gap-2">
+        <p className="text-sm text-danger">{error}</p>
+        <div>
+          <Button type="button" variant="secondary" onClick={load}>
+            Reintentar
+          </Button>
+        </div>
+      </div>
+    )
   }
 
   if (contacts === null) return <p className="text-sm text-muted-foreground">Cargando…</p>
@@ -729,12 +766,20 @@ function SafetyPlanHistoryView({ patientId, onBack }: { patientId: string; onBac
   const [openedItems, setOpenedItems] = useState<SafetyPlanListItem[]>([])
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
+  const loadHistory = () => {
+    setError(null)
     safetyPlanApi
       .listHistory(patientId)
-      .then(setHistory)
-      .catch((err) => setError(typeof err === 'string' ? err : 'No se pudo cargar el historial.'))
-  }, [patientId])
+      .then((all) => {
+        setHistory(all)
+        setError(null)
+      })
+      .catch((err) => {
+        setHistory(null)
+        setError(typeof err === 'string' ? err : 'No se pudo cargar el historial. Intenta nuevamente.')
+      })
+  }
+  useEffect(loadHistory, [patientId])
 
   const open = async (summary: SafetyPlanSummary) => {
     setError(null)
@@ -775,8 +820,17 @@ function SafetyPlanHistoryView({ patientId, onBack }: { patientId: string; onBac
           Volver
         </Button>
       </div>
-      {error && <p className="text-sm text-danger">{error}</p>}
-      {history === null && <p className="text-sm text-muted-foreground">Cargando…</p>}
+      {error && (
+        <div className="flex flex-col gap-2">
+          <p className="text-sm text-danger">{error}</p>
+          <div>
+            <Button type="button" variant="secondary" onClick={loadHistory}>
+              Reintentar
+            </Button>
+          </div>
+        </div>
+      )}
+      {history === null && !error && <p className="text-sm text-muted-foreground">Cargando…</p>}
       {history !== null && history.length === 0 && <p className="text-sm text-muted-foreground">Todavía no hay versiones registradas.</p>}
       {history !== null && history.length > 0 && (
         <ul className="flex flex-col divide-y divide-border">
@@ -870,7 +924,18 @@ export function SafetyPlanTab({ patientId, patientArchived }: { patientId: strin
     }
   }
 
-  if (error) return <p className="text-sm text-danger">{error}</p>
+  if (error) {
+    return (
+      <div className="flex flex-col gap-2">
+        <p className="text-sm text-danger">{error}</p>
+        <div>
+          <Button type="button" variant="secondary" onClick={load}>
+            Reintentar
+          </Button>
+        </div>
+      </div>
+    )
+  }
   if (current === undefined || draft === undefined) return <p className="text-sm text-muted-foreground">Cargando…</p>
 
   if (view === 'history') {
