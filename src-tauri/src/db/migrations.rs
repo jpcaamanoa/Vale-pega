@@ -1189,6 +1189,42 @@ BEGIN
 END;
 "#;
 
+/// Biblioteca global de recursos (fase de continuación post-Fase 19),
+/// distinta de los Documentos por paciente (Fase 16): un recurso se sube
+/// **una sola vez** y puede asociarse a varios pacientes sin duplicar
+/// nunca el archivo físico ni su cifrado.
+///
+/// `library_resources`, `library_tags` y `library_resource_tags` ya
+/// existían desde `SCHEMA_V1` — declaradas entonces pero sin ningún código
+/// que las usara todavía (cero referencias fuera de este archivo antes de
+/// esta fase). `library_resources.file_document_id` ya apuntaba a
+/// `documents(id)`: el diseño original de Fase 1 ya prefiguraba que el
+/// archivo real de un recurso de biblioteca fuera una fila de `documents`
+/// — exactamente la reutilización de infraestructura de cifrado que pide
+/// esta fase, sin crear una segunda tabla de archivos ni una segunda
+/// implementación de cifrado. La única pieza que faltaba, y que esta
+/// migración agrega, es la relación N:M con pacientes — no existía
+/// ninguna tabla de asociación biblioteca↔paciente hasta ahora.
+///
+/// `documents.patient_id` es `NULL` para el documento de un recurso de
+/// biblioteca (la columna ya era nullable desde `SCHEMA_V1`; ver el
+/// cambio de `NewDocumentRow` en `repositories::documents` de esta misma
+/// fase) — así, `list_all_storage_paths` (usado por Backup) ya incluye
+/// automáticamente estos archivos sin ningún cambio en `backup::service`:
+/// el respaldo de la Biblioteca y de sus asociaciones (fila de
+/// `library_resource_patients`, dentro del propio `vault.db`) queda
+/// cubierto por el mismo `VACUUM INTO` + copia de ciphertexts que ya
+/// existía para Documentos.
+const SCHEMA_V12: &str = r#"
+CREATE TABLE library_resource_patients (
+  resource_id TEXT NOT NULL REFERENCES library_resources(id) ON DELETE CASCADE,
+  patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  linked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (resource_id, patient_id)
+);
+CREATE INDEX idx_library_resource_patients_patient ON library_resource_patients(patient_id);
+"#;
+
 /// Todas las migraciones de la aplicación, en orden. Nunca se edita una
 /// migración ya publicada — los cambios de esquema futuros se agregan como
 /// una nueva entrada al final de este `vec!`.
@@ -1205,6 +1241,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V9).foreign_key_check(),
         M::up(SCHEMA_V10).foreign_key_check(),
         M::up(SCHEMA_V11).foreign_key_check(),
+        M::up(SCHEMA_V12).foreign_key_check(),
     ])
 }
 
@@ -1263,6 +1300,7 @@ mod tests {
         "safety_plans",
         "safety_plan_contacts",
         "safety_plan_list_items",
+        "library_resource_patients",
     ];
 
     fn migrated_vault(name: &str) -> (rusqlite::Connection, std::path::PathBuf, VaultKey) {
@@ -2726,7 +2764,7 @@ mod tests {
         assert!(cols.contains(&"key_wrap_version".to_string()), "documents debe tener key_wrap_version desde el arranque");
 
         let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(schema_version, 11, "una base nueva V1..V11 debe terminar en el esquema más reciente");
+        assert_eq!(schema_version, 12, "una base nueva V1..V12 debe terminar en el esquema más reciente");
     }
 
     #[test]
@@ -2773,7 +2811,7 @@ mod tests {
         assert_eq!(filename, "informe.pdf");
 
         let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(schema_version, 11, "run_migrations siempre lleva al esquema más reciente, no solo hasta V10");
+        assert_eq!(schema_version, 12, "run_migrations siempre lleva al esquema más reciente, no solo hasta V10");
     }
 
     #[test]
@@ -2916,7 +2954,7 @@ mod tests {
         )
         .unwrap();
 
-        run_migrations(&mut conn).expect("V11 debe aplicarse sobre una base V10 con contactos ya existentes");
+        run_migrations(&mut conn).expect("V11..V12 deben aplicarse sobre una base V10 con contactos ya existentes");
 
         // El contacto anterior conserva EXACTAMENTE su contact_type original —
         // nunca se reclasifica hacia distraction_person/help_contact.
@@ -2950,7 +2988,7 @@ mod tests {
         .expect("help_contact debe ser un contact_type válido después de V11");
 
         let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(schema_version, 11);
+        assert_eq!(schema_version, 12, "run_migrations siempre lleva al esquema más reciente, no solo hasta V11");
     }
 
     #[test]
@@ -2964,9 +3002,88 @@ mod tests {
         )
         .unwrap();
 
-        run_migrations(&mut conn).expect("reaplicar V1..V11 ya vigentes no debería fallar");
+        run_migrations(&mut conn).expect("reaplicar V1..V12 ya vigentes no debería fallar");
 
         let name: String = conn.query_row("SELECT name FROM safety_plan_contacts WHERE id = 'c1'", [], |r| r.get(0)).unwrap();
         assert_eq!(name, "Dra. X");
+    }
+
+    // ---- V12: library_resource_patients (Biblioteca global) ----
+
+    fn insert_sample_library_resource(conn: &Connection, id: &str, title: &str) {
+        conn.execute("INSERT INTO library_resources (id, title) VALUES (?1, ?2)", params![id, title]).unwrap();
+    }
+
+    #[test]
+    fn fresh_database_has_the_v12_library_resource_patients_table() {
+        let (conn, _path, _key) = migrated_vault("v12-fresh-table");
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(schema_version, 12, "una base nueva V1..V12 debe terminar en el esquema más reciente");
+
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'Paciente Uno')", []).unwrap();
+        insert_sample_library_resource(&conn, "r1", "Guía ficticia de psicoeducación");
+        conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('r1', 'p1')", []).unwrap();
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM library_resource_patients", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn v12_rejects_a_duplicate_resource_patient_link() {
+        let (conn, _path, _key) = migrated_vault("v12-duplicate-link");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        insert_sample_library_resource(&conn, "r1", "Recurso");
+        conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('r1', 'p1')", []).unwrap();
+        let err = conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('r1', 'p1')", []).unwrap_err();
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)), "la clave primaria compuesta debe rechazar un enlace duplicado");
+    }
+
+    #[test]
+    fn v12_deleting_a_library_resource_cascades_to_its_patient_links() {
+        let (conn, _path, _key) = migrated_vault("v12-cascade-resource");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        insert_sample_library_resource(&conn, "r1", "Recurso");
+        conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('r1', 'p1')", []).unwrap();
+
+        conn.execute("DELETE FROM library_resources WHERE id = 'r1'", []).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM library_resource_patients", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "ON DELETE CASCADE debe eliminar los enlaces huérfanos al borrar el recurso");
+    }
+
+    #[test]
+    fn v12_deleting_a_patient_cascades_to_its_library_links() {
+        let (conn, _path, _key) = migrated_vault("v12-cascade-patient");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        insert_sample_library_resource(&conn, "r1", "Recurso");
+        conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('r1', 'p1')", []).unwrap();
+
+        conn.execute("DELETE FROM patients WHERE id = 'p1'", []).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM library_resource_patients", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "ON DELETE CASCADE debe eliminar los enlaces huérfanos al borrar el paciente");
+    }
+
+    #[test]
+    fn v12_rejects_a_link_to_a_nonexistent_resource_or_patient() {
+        let (conn, _path, _key) = migrated_vault("v12-fk-check");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        let err = conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('no-existe', 'p1')", []).unwrap_err();
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+
+        insert_sample_library_resource(&conn, "r1", "Recurso");
+        let err = conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('r1', 'no-existe')", []).unwrap_err();
+        assert!(matches!(err, SqliteError::SqliteFailure(_, _)));
+    }
+
+    #[test]
+    fn v12_migration_is_idempotent() {
+        let (mut conn, _path, _key) = migrated_vault("v12-idempotent");
+        conn.execute("INSERT INTO patients (id, full_name) VALUES ('p1', 'X')", []).unwrap();
+        insert_sample_library_resource(&conn, "r1", "Recurso");
+        conn.execute("INSERT INTO library_resource_patients (resource_id, patient_id) VALUES ('r1', 'p1')", []).unwrap();
+
+        run_migrations(&mut conn).expect("reaplicar V1..V12 ya vigentes no debería fallar");
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM library_resource_patients", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
     }
 }

@@ -574,7 +574,7 @@ mod tests {
 
         let manifest = inspect_backup(&dest).unwrap();
         assert_eq!(manifest.backup_format_version, BACKUP_FORMAT_VERSION);
-        assert_eq!(manifest.schema_version, 11);
+        assert_eq!(manifest.schema_version, 12);
         assert_eq!(manifest.backup_id, summary.backup_id);
     }
 
@@ -1041,7 +1041,7 @@ mod tests {
         .unwrap();
 
         let err = restore_backup(&session, &vault_dir, &future, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap_err();
-        assert!(matches!(err, RestoreError::SchemaTooNew { backup_schema_version: 99, supported_schema_version: 11 }));
+        assert!(matches!(err, RestoreError::SchemaTooNew { backup_schema_version: 99, supported_schema_version: 12 }));
         assert_vault_untouched(&session, &vault_dir, "ContrasenaSegura2026!", 1);
     }
 
@@ -1361,6 +1361,92 @@ mod tests {
         let (content, summary) = crate::services::documents::get_document_content(&target_session, &target_files_root, &doc_id).unwrap();
         assert_eq!(content, b"contenido original a restaurar");
         assert_eq!(summary.id, doc_id);
+    }
+
+    // ---------------------------------------------------------------
+    // Fase de continuación post-Fase 19 (Biblioteca global de recursos) — Backup/Restore debe
+    // incluir tanto el archivo cifrado del recurso (una fila de `documents` con
+    // `patient_id = NULL`) como sus asociaciones con pacientes
+    // (`library_resource_patients`, dentro del propio `vault.db`).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn backup_includes_a_library_resources_file_automatically() {
+        // Sin ningún cambio en create_backup para esta fase: list_all_storage_paths ya no filtra
+        // por patient_id, así que el documento (patient_id = NULL) de un recurso de Biblioteca
+        // queda incluido exactamente igual que un documento clínico normal.
+        let app_dir = temp_app_dir("library-backup-includes-file");
+        let (session, vault_dir, _rc) = new_unlocked_vault(&app_dir, "ContrasenaSegura2026!");
+        let sources = app_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let source_path = sources.join("guia.pdf");
+        std::fs::write(&source_path, b"contenido ficticio de una guia de biblioteca").unwrap();
+        let files_root = vault_dir.join("files");
+        let resource = crate::services::library::create_resource(
+            &session,
+            &files_root,
+            crate::services::library::NewLibraryResourceInput {
+                title: "Guía ficticia".to_string(),
+                resource_type: None,
+                author: None,
+                source_url: None,
+                summary: None,
+                source_path: Some(source_path.to_str().unwrap().to_string()),
+                mime_type: None,
+            },
+        )
+        .unwrap();
+
+        let dest = app_dir.join("respaldo.cclinbackup");
+        create_backup(&session, &vault_dir, &dest).unwrap();
+        let manifest = inspect_backup(&dest).unwrap();
+        assert_eq!(manifest.files.len(), 3, "vault.db + vault.meta.json + el ciphertext del recurso de biblioteca");
+        assert!(resource.file_document_id.is_some());
+    }
+
+    #[test]
+    fn restore_recovers_a_library_resource_its_file_and_its_patient_association() {
+        let source_dir = temp_app_dir("library-restore-source");
+        let (source_session, source_vault_dir, _rc) = new_unlocked_vault(&source_dir, "ContrasenaSegura2026!");
+        let patient_id = create_test_patient(&source_session, "Paciente Con Recurso De Biblioteca");
+        let sources = source_dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let source_path = sources.join("protocolo.pdf");
+        std::fs::write(&source_path, b"contenido original del protocolo").unwrap();
+        let files_root = source_vault_dir.join("files");
+        let resource = crate::services::library::create_resource(
+            &source_session,
+            &files_root,
+            crate::services::library::NewLibraryResourceInput {
+                title: "Protocolo ficticio".to_string(),
+                resource_type: Some("protocolo".to_string()),
+                author: None,
+                source_url: None,
+                summary: None,
+                source_path: Some(source_path.to_str().unwrap().to_string()),
+                mime_type: None,
+            },
+        )
+        .unwrap();
+        source_session.with_connection(|conn| crate::services::library::link_resource_to_patient(conn, &resource.id, &patient_id)).unwrap().unwrap();
+
+        let dest = source_dir.join("respaldo.cclinbackup");
+        create_backup(&source_session, &source_vault_dir, &dest).unwrap();
+
+        let target_dir = temp_app_dir("library-restore-target");
+        let target_vault_dir = target_dir.join("vault");
+        let target_session = VaultSession::new(&target_vault_dir);
+        restore_backup(&target_session, &target_vault_dir, &dest, RestoreCredential::Password("ContrasenaSegura2026!".to_string())).unwrap();
+        target_session.unlock("ContrasenaSegura2026!").unwrap();
+
+        let target_files_root = target_vault_dir.join("files");
+        let (content, summary) = crate::services::library::get_resource_content(&target_session, &target_files_root, &resource.id).unwrap();
+        assert_eq!(content, b"contenido original del protocolo");
+        assert_eq!(summary.id, resource.id);
+
+        let restored_patients = target_session.with_connection(|conn| crate::services::library::list_patients_for_resource(conn, &resource.id)).unwrap().unwrap();
+        assert_eq!(restored_patients.len(), 1, "la asociación con el paciente debe sobrevivir al ciclo de backup/restore");
+        assert_eq!(restored_patients[0].id, patient_id);
     }
 
     /// CRYPTO-1 (Fase 17): un backup construido con documentos de AMBOS esquemas de envoltura

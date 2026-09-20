@@ -212,7 +212,7 @@ fn validate_category(category: Option<String>) -> Result<Option<String>, Documen
 /// "sniffing" de bytes mágicos en esta fase, ver `docs/documents.md`). Únicamente informativo:
 /// nunca se usa para decidir cómo abrir, dónde escribir, ni qué comando ejecutar con el archivo
 /// (Bloque 30 de la aprobación).
-fn guess_mime_from_extension(filename: &str) -> String {
+pub(crate) fn guess_mime_from_extension(filename: &str) -> String {
     let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "pdf" => "application/pdf",
@@ -228,14 +228,14 @@ fn guess_mime_from_extension(filename: &str) -> String {
     .to_string()
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
 }
 
-fn wrapped_key_to_columns(wrapped: &WrappedFileKey) -> (String, String) {
+pub(crate) fn wrapped_key_to_columns(wrapped: &WrappedFileKey) -> (String, String) {
     (Base64::encode_string(&wrapped.ciphertext), Base64::encode_string(&wrapped.nonce))
 }
 

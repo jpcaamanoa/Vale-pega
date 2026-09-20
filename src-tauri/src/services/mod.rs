@@ -11,6 +11,7 @@ pub mod episode_closures;
 pub mod episode_clinical_profile;
 pub mod formulations;
 pub mod goals;
+pub mod library;
 pub mod patient_clinical_profile;
 pub mod patient_prep_notes;
 pub mod patients;
