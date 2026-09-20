@@ -2,10 +2,12 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { Button } from '../../components/ui/Button'
+import { TagListField } from '../../components/ui/TagListField'
 import { TextField } from '../../components/ui/TextField'
 import { Textarea } from '../../components/ui/Textarea'
 import { clinicalProfileApi } from './api'
 import { clinicalProfileFormSchema, type ClinicalProfileFormValues } from './schema'
+import { parseRiskFlags, serializeRiskFlags } from './riskFlags'
 import type { ClinicalProfile, ClinicalProfileInput } from './types'
 
 function ProfileField({ label, value }: { label: string; value: string | null }) {
@@ -13,6 +15,27 @@ function ProfileField({ label, value }: { label: string; value: string | null })
     <div>
       <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</h4>
       <p className="whitespace-pre-wrap text-sm text-foreground">{value || '—'}</p>
+    </div>
+  )
+}
+
+/** Igual que `ProfileField`, pero para "Factores de riesgo": nunca muestra el JSON crudo. */
+function RiskFlagsField({ value }: { value: string | null }) {
+  const tags = parseRiskFlags(value)
+  return (
+    <div>
+      <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Factores de riesgo</h4>
+      {tags.length === 0 ? (
+        <p className="text-sm text-foreground">—</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {tags.map((tag, i) => (
+            <span key={`${tag}-${i}`} className="inline-flex items-center rounded-full bg-accent-soft px-2.5 py-1 text-xs font-medium text-accent">
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -31,6 +54,7 @@ function ClinicalProfileForm({
   onCancel: () => void
 }) {
   const [error, setError] = useState<string | null>(null)
+  const [riskFlagTags, setRiskFlagTags] = useState<string[]>(() => parseRiskFlags(initial?.riskFlags))
   const {
     register,
     handleSubmit,
@@ -41,7 +65,6 @@ function ClinicalProfileForm({
       presentingProblem: initial?.presentingProblem ?? '',
       primaryDiagnosisCode: initial?.primaryDiagnosisCode ?? '',
       diagnosisNotes: initial?.diagnosisNotes ?? '',
-      riskFlags: initial?.riskFlags ?? '',
       relevantMedicalNotes: initial?.relevantMedicalNotes ?? '',
     },
   })
@@ -53,7 +76,7 @@ function ClinicalProfileForm({
         presentingProblem: values.presentingProblem || null,
         primaryDiagnosisCode: values.primaryDiagnosisCode || null,
         diagnosisNotes: values.diagnosisNotes || null,
-        riskFlags: values.riskFlags || null,
+        riskFlags: serializeRiskFlags(riskFlagTags),
         relevantMedicalNotes: values.relevantMedicalNotes || null,
       }
       const saved = mode === 'create' ? await clinicalProfileApi.create(patientId, input) : await clinicalProfileApi.update(patientId, input)
@@ -68,11 +91,11 @@ function ClinicalProfileForm({
       <TextField label="Motivo de consulta" {...register('presentingProblem')} error={errors.presentingProblem?.message} />
       <TextField label="Código de diagnóstico principal" {...register('primaryDiagnosisCode')} error={errors.primaryDiagnosisCode?.message} />
       <Textarea label="Notas diagnósticas" {...register('diagnosisNotes')} error={errors.diagnosisNotes?.message} />
-      <Textarea
+      <TagListField
         label="Factores de riesgo"
-        placeholder='Opcional. Debe ser JSON válido si se completa, por ejemplo: ["dato uno", "dato dos"]'
-        {...register('riskFlags')}
-        error={errors.riskFlags?.message}
+        helperText="Opcional. Escribe un factor y presiona Enter para agregarlo."
+        tags={riskFlagTags}
+        onChange={setRiskFlagTags}
       />
       <Textarea label="Notas médicas relevantes" {...register('relevantMedicalNotes')} error={errors.relevantMedicalNotes?.message} />
       {error && <p className="text-sm text-danger">{error}</p>}
@@ -163,7 +186,7 @@ export function ClinicalProfileTab({ patientId, patientArchived }: { patientId: 
       <ProfileField label="Motivo de consulta" value={profile.presentingProblem} />
       <ProfileField label="Código de diagnóstico principal" value={profile.primaryDiagnosisCode} />
       <ProfileField label="Notas diagnósticas" value={profile.diagnosisNotes} />
-      <ProfileField label="Factores de riesgo" value={profile.riskFlags} />
+      <RiskFlagsField value={profile.riskFlags} />
       <ProfileField label="Notas médicas relevantes" value={profile.relevantMedicalNotes} />
     </div>
   )

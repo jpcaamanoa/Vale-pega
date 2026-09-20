@@ -1,25 +1,17 @@
 import { z } from 'zod'
 
 /**
- * `riskFlags` se valida únicamente como JSON sintácticamente válido — igual
- * criterio que el backend (`services::patient_clinical_profile::validate_risk_flags`):
- * ninguna forma específica (objeto, lista, etc.) es exigida ni interpretada.
+ * `riskFlags` ("Factores de riesgo") ya no se edita como texto en este
+ * formulario — la UI lo maneja como una lista de tags (`TagListField`,
+ * serializada con `serializeRiskFlags`), que siempre produce JSON válido
+ * por construcción. Por eso no necesita su propia validación aquí; el
+ * backend (`services::patient_clinical_profile::validate_risk_flags`) sigue
+ * validando de todas formas, como último resguardo.
  */
-const riskFlagsField = z.string().optional().refine((v) => {
-  if (!v || !v.trim()) return true
-  try {
-    JSON.parse(v)
-    return true
-  } catch {
-    return false
-  }
-}, 'Debe ser JSON válido, por ejemplo: ["dato uno", "dato dos"]')
-
 export const clinicalProfileFormSchema = z.object({
   presentingProblem: z.string().optional(),
   primaryDiagnosisCode: z.string().optional(),
   diagnosisNotes: z.string().optional(),
-  riskFlags: riskFlagsField,
   relevantMedicalNotes: z.string().optional(),
 })
 
