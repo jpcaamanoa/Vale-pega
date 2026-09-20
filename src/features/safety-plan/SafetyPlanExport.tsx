@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '../../components/ui/Button'
 import { patientsApi } from '../patients/api'
-import { formatSessionDate } from '../sessions/datetime'
-import type { SafetyPlan, SafetyPlanContact, SafetyPlanContactType, SafetyPlanListItem } from './types'
+import { buildSafetyPlanExportModel, type SafetyPlanExportContactLine, type SafetyPlanExportModel, type SafetyPlanExportStepModel } from './exportModel'
+import type { SafetyPlan, SafetyPlanContact, SafetyPlanListItem } from './types'
 
 /**
  * Exportar/Imprimir el Plan de Seguridad (FASE 3, autorizada explícitamente). Usa el diálogo
@@ -13,16 +13,18 @@ import type { SafetyPlan, SafetyPlanContact, SafetyPlanContactType, SafetyPlanLi
  * adicional. `#print-root` (ver `index.css`) es un portal invisible en pantalla y es lo único
  * visible cuando se imprime — el resto de la aplicación (`#root`) se oculta durante la impresión.
  *
- * Contenido: **solo** el plan vigente que ya se le muestra a la usuaria en pantalla (los mismos
- * `plan`/`contacts`/`items` que `PlanContent`) — nunca diagnóstico, notas clínicas, antecedentes,
- * sesiones, formulación, objetivos, evaluaciones, UUIDs, ni metadata interna. El nombre del
- * paciente es opcional (checkbox, por defecto marcado) para poder generar también una versión
- * anónima.
+ * Contenido: **solo** el modelo puro construido por `buildSafetyPlanExportModel`
+ * (`exportModel.ts`) — nunca diagnóstico, notas clínicas, antecedentes, sesiones, formulación,
+ * objetivos, evaluaciones, UUIDs, número de versión interno, ni ninguna otra metadata interna. El
+ * nombre del paciente es opcional (checkbox, por defecto marcado) para poder generar también una
+ * versión anónima.
+ *
+ * El header/footer nativo de impresión de Chromium/WebView2 (fecha/hora, título del documento,
+ * `location.href` — que con `HashRouter` incluye la ruta interna con el UUID del paciente — y
+ * número de página) se elimina estructuralmente vía `@page { margin: 0 }` en `index.css`: sin
+ * margen de página no hay superficie donde el motor de impresión pueda dibujarlo. Ver el
+ * comentario en `index.css` para el diagnóstico completo.
  */
-
-function ymd(iso: string): string {
-  return iso.slice(0, 10)
-}
 
 /** `#print-root` (ver `index.css`) tiene que existir como hijo directo de `<body>` — hermano de
  * `#root`, no dentro de él — para que la regla `@media print { #root { display: none } }` no lo
@@ -37,40 +39,33 @@ function getPrintRootElement(): HTMLElement {
   return el
 }
 
-function PrintField({ label, value }: { label: string; value: string | null }) {
+function PrintFreeText({ value }: { value: string | null }) {
   if (!value || !value.trim()) return null
-  return (
-    <div style={{ marginBottom: '10px' }}>
-      <div style={{ fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#6b6558', marginBottom: '2px' }}>{label}</div>
-      <div style={{ fontSize: '13px', color: '#2b2820', whiteSpace: 'pre-wrap' }}>{value}</div>
-    </div>
-  )
+  return <div style={{ fontSize: '13px', color: '#2b2820', whiteSpace: 'pre-wrap', marginBottom: '10px' }}>{value}</div>
 }
 
-function PrintItemList({ items, itemType }: { items: SafetyPlanListItem[]; itemType: SafetyPlanListItem['itemType'] }) {
-  const filtered = items.filter((i) => i.itemType === itemType).sort((a, b) => a.sortOrder - b.sortOrder)
-  if (filtered.length === 0) return null
+function PrintItems({ items }: { items: string[] }) {
+  if (items.length === 0) return null
   return (
     <ul style={{ margin: '0 0 10px 0', paddingLeft: '18px' }}>
-      {filtered.map((i) => (
-        <li key={i.id} style={{ fontSize: '13px', color: '#2b2820', marginBottom: '3px' }}>
-          {i.content}
+      {items.map((content, idx) => (
+        <li key={idx} style={{ fontSize: '13px', color: '#2b2820', marginBottom: '3px' }}>
+          {content}
         </li>
       ))}
     </ul>
   )
 }
 
-function PrintContactList({ contacts, types }: { contacts: SafetyPlanContact[]; types: SafetyPlanContactType[] }) {
-  const filtered = contacts.filter((c) => types.includes(c.contactType)).sort((a, b) => a.sortOrder - b.sortOrder)
-  if (filtered.length === 0) return null
+function PrintContacts({ contacts }: { contacts: SafetyPlanExportContactLine[] }) {
+  if (contacts.length === 0) return null
   return (
     <div style={{ marginBottom: '10px' }}>
-      {filtered.map((c) => (
-        <div key={c.id} style={{ fontSize: '13px', color: '#2b2820', marginBottom: '6px', paddingLeft: '2px' }}>
+      {contacts.map((c, idx) => (
+        <div key={idx} style={{ fontSize: '13px', color: '#2b2820', marginBottom: '6px', paddingLeft: '2px' }}>
           <div style={{ fontWeight: 600 }}>
             {c.name}
-            {c.relationshipOrRole ? ` · ${c.relationshipOrRole}` : ''}
+            {c.role ? ` · ${c.role}` : ''}
             {c.isEmergencyContact ? ' · Contacto de emergencia' : ''}
           </div>
           {c.phone && <div>Teléfono: {c.phone}</div>}
@@ -83,64 +78,26 @@ function PrintContactList({ contacts, types }: { contacts: SafetyPlanContact[]; 
   )
 }
 
-function SafetyPlanPrintDocument({
-  plan,
-  contacts,
-  items,
-  patientName,
-  includeName,
-}: {
-  plan: SafetyPlan
-  contacts: SafetyPlanContact[]
-  items: SafetyPlanListItem[]
-  patientName: string | null
-  includeName: boolean
-}) {
-  const legacySupportContacts = contacts.filter((c) => c.contactType === 'support_person')
+function PrintStep({ step }: { step: SafetyPlanExportStepModel }) {
+  return (
+    <section style={{ marginBottom: '18px', breakInside: 'avoid' }}>
+      <h2 style={{ fontSize: '13px', fontWeight: 700, borderBottom: '1px solid #d8d2c4', paddingBottom: '3px', marginBottom: '8px' }}>{step.title}</h2>
+      <PrintItems items={step.items} />
+      <PrintContacts contacts={step.contacts} />
+      <PrintFreeText value={step.freeText} />
+    </section>
+  )
+}
+
+function SafetyPlanPrintDocument({ model }: { model: SafetyPlanExportModel }) {
   return (
     <div style={{ maxWidth: '680px', margin: '0 auto', padding: '32px', fontFamily: 'Georgia, "Times New Roman", serif', color: '#2b2820' }}>
-      <h1 style={{ fontSize: '22px', fontWeight: 700, letterSpacing: '0.02em', marginBottom: '4px' }}>PLAN DE SEGURIDAD</h1>
-      {includeName && patientName && <p style={{ fontSize: '14px', marginBottom: '2px' }}>{patientName}</p>}
-      <p style={{ fontSize: '11px', color: '#6b6558', marginBottom: '20px' }}>
-        Versión {plan.version}
-        {plan.confirmedAt ? ` · Confirmado el ${formatSessionDate(ymd(plan.confirmedAt))}` : ''}
-        {plan.reviewedAt ? ` · Última revisión: ${formatSessionDate(ymd(plan.reviewedAt))}` : ''}
-      </p>
-
-      <section style={{ marginBottom: '18px' }}>
-        <h2 style={{ fontSize: '13px', fontWeight: 700, borderBottom: '1px solid #d8d2c4', paddingBottom: '3px', marginBottom: '8px' }}>Paso 1 · Señales de alerta</h2>
-        <PrintItemList items={items} itemType="warning_sign" />
-        <PrintField label="" value={plan.warningSigns} />
-      </section>
-
-      <section style={{ marginBottom: '18px' }}>
-        <h2 style={{ fontSize: '13px', fontWeight: 700, borderBottom: '1px solid #d8d2c4', paddingBottom: '3px', marginBottom: '8px' }}>Paso 2 · Estrategias individuales</h2>
-        <PrintItemList items={items} itemType="strategy" />
-        <PrintField label="" value={plan.internalStrategies} />
-      </section>
-
-      <section style={{ marginBottom: '18px' }}>
-        <h2 style={{ fontSize: '13px', fontWeight: 700, borderBottom: '1px solid #d8d2c4', paddingBottom: '3px', marginBottom: '8px' }}>Paso 3 · Personas y lugares de distracción</h2>
-        <PrintItemList items={items} itemType="distraction_place" />
-        <PrintContactList contacts={contacts} types={['distraction_person']} />
-        <PrintField label="" value={plan.socialSupportStrategies} />
-        {legacySupportContacts.length > 0 && <PrintContactList contacts={contacts} types={['support_person']} />}
-      </section>
-
-      <section style={{ marginBottom: '18px' }}>
-        <h2 style={{ fontSize: '13px', fontWeight: 700, borderBottom: '1px solid #d8d2c4', paddingBottom: '3px', marginBottom: '8px' }}>Paso 4 · Personas a las que pedir ayuda</h2>
-        <PrintContactList contacts={contacts} types={['help_contact']} />
-      </section>
-
-      <section style={{ marginBottom: '18px' }}>
-        <h2 style={{ fontSize: '13px', fontWeight: 700, borderBottom: '1px solid #d8d2c4', paddingBottom: '3px', marginBottom: '8px' }}>Paso 5 · Profesionales e instituciones de crisis</h2>
-        <PrintContactList contacts={contacts} types={['professional', 'service']} />
-      </section>
-
-      <section style={{ marginBottom: '18px', breakInside: 'avoid' }}>
-        <h2 style={{ fontSize: '13px', fontWeight: 700, borderBottom: '1px solid #d8d2c4', paddingBottom: '3px', marginBottom: '8px' }}>Paso 6 · Acciones para aumentar la seguridad del entorno</h2>
-        <PrintField label="" value={plan.meansSafety} />
-      </section>
+      <h1 style={{ fontSize: '22px', fontWeight: 700, letterSpacing: '0.02em', marginBottom: '4px' }}>{model.documentTitle}</h1>
+      {model.patientName && <p style={{ fontSize: '14px', marginBottom: '2px' }}>{model.patientName}</p>}
+      {model.updatedLabel && <p style={{ fontSize: '11px', color: '#6b6558', marginBottom: '20px' }}>{model.updatedLabel}</p>}
+      {model.steps.map((step) => (
+        <PrintStep key={step.title} step={step} />
+      ))}
     </div>
   )
 }
@@ -182,6 +139,8 @@ export function SafetyPlanExportModal({
     }
   }, [printing])
 
+  const model = buildSafetyPlanExportModel({ plan, contacts, items, patientName, includeName })
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/40 px-4 py-8">
       <div className="my-auto w-full max-w-md rounded-2xl bg-surface-elevated p-6 shadow-lg">
@@ -206,7 +165,7 @@ export function SafetyPlanExportModal({
         </div>
       </div>
 
-      {printing && createPortal(<SafetyPlanPrintDocument plan={plan} contacts={contacts} items={items} patientName={patientName} includeName={includeName} />, getPrintRootElement())}
+      {printing && createPortal(<SafetyPlanPrintDocument model={model} />, getPrintRootElement())}
     </div>
   )
 }
