@@ -1,18 +1,24 @@
 //! Llamadas HTTP a Google: intercambio/renovación/revocación de tokens,
 //! listado de calendarios, y CRUD de eventos. Ningún dato clínico entra
 //! nunca a este archivo — las funciones de creación/actualización de
-//! eventos reciben únicamente `starts_at`/`ends_at` (nunca un paciente, un
-//! título real, ni ningún otro campo de `appointments`), y el texto del
-//! evento (`"Sesión clínica"`) está fijo dentro de este módulo, no se
-//! recibe como parámetro — es estructuralmente imposible que un llamador
-//! le pase un texto distinto.
+//! eventos reciben únicamente `starts_at`/`ends_at` y, desde el cambio que
+//! agrega el primer nombre del paciente y la modalidad al título del
+//! evento, el nombre completo del paciente y la modalidad — nunca un
+//! `Appointment` completo, nunca RUT, diagnóstico, notas ni ningún otro
+//! campo de la ficha.
+//!
+//! La reducción de "nombre completo" a "solo el primer nombre" no depende
+//! de la disciplina de quien llama: [`build_event_summary`] es la única
+//! función que toca esos datos y, por construcción (`split_whitespace().next()`),
+//! nunca puede emitir más que el primer token del nombre recibido — es
+//! estructuralmente imposible que un apellido llegue al `summary` que sale
+//! hacia Google, sin importar qué reciba como parámetro.
 
 use serde::{Deserialize, Serialize};
 
 use super::oauth::{GOOGLE_REVOKE_ENDPOINT, GOOGLE_TOKEN_ENDPOINT};
 
 const CALENDAR_LIST_ENDPOINT: &str = "https://www.googleapis.com/calendar/v3/users/me/calendarList";
-const EVENT_SUMMARY: &str = "Sesión clínica";
 
 #[derive(Debug)]
 pub enum GoogleApiError {
@@ -157,14 +163,44 @@ pub async fn list_calendars(access_token: &str) -> Result<Vec<GoogleCalendarList
     Ok(parsed.items)
 }
 
+/// Toma solo el primer token separado por espacios de un nombre completo
+/// (regla del pedido: "si el nombre completo tiene espacios, usar solo el
+/// primer token no vacío"). `split_whitespace` ya descarta espacios
+/// repetidos y los de los extremos, así que un nombre como
+/// `"   Rossina   Pérez  Soto"` produce `"Rossina"` igual que
+/// `"Rossina Pérez Soto"`.
+fn first_name(patient_full_name: Option<&str>) -> Option<&str> {
+    patient_full_name?.split_whitespace().next()
+}
+
+/// Construye el `summary` del evento: un emoji según la modalidad
+/// ("💻 " para online, "🤝 " para presencial, nada para cualquier otro
+/// valor — incluida `telefonico` o ninguna modalidad, fuera del alcance de
+/// este pedido) seguido de "Sesión" y, si hay un nombre utilizable, el
+/// primer nombre del paciente. Sin nombre utilizable (sin paciente, o
+/// nombre vacío/en blanco), cae al fallback neutro "Sesión" con el mismo
+/// emoji. Nunca incluye apellido, RUT, diagnóstico, notas clínicas, ni la
+/// modalidad escrita como texto (solo el emoji).
+pub fn build_event_summary(patient_full_name: Option<&str>, modality: Option<&str>) -> String {
+    let emoji = match modality {
+        Some("online") => "💻 ",
+        Some("presencial") => "🤝 ",
+        _ => "",
+    };
+    match first_name(patient_full_name) {
+        Some(name) => format!("{emoji}Sesión {name}"),
+        None => format!("{emoji}Sesión"),
+    }
+}
+
 /// El único lugar donde se construye el cuerpo JSON que sale hacia Google
-/// para representar una cita. Función pura y testeable sin red: recibe
-/// exclusivamente horarios, nunca un `Appointment` completo — así es
-/// estructuralmente imposible que termine incluyendo un campo clínico
-/// aunque `Appointment` gane campos nuevos en el futuro.
-fn event_payload(starts_at: &str, ends_at: &str) -> serde_json::Value {
+/// para representar una cita. Función pura y testeable sin red: recibe el
+/// nombre completo del paciente y la modalidad solo para reducirlos de
+/// inmediato, vía [`build_event_summary`], al título mínimo — nunca los
+/// reenvía tal cual, y nunca recibe ningún otro campo de `Appointment`.
+fn event_payload(patient_full_name: Option<&str>, modality: Option<&str>, starts_at: &str, ends_at: &str) -> serde_json::Value {
     serde_json::json!({
-        "summary": EVENT_SUMMARY,
+        "summary": build_event_summary(patient_full_name, modality),
         "start": { "dateTime": starts_at },
         "end": { "dateTime": ends_at },
     })
@@ -198,12 +234,20 @@ struct EventResponse {
     id: String,
 }
 
-pub async fn create_event(access_token: &str, calendar_id: &str, starts_at: &str, ends_at: &str) -> Result<String, GoogleApiError> {
+#[allow(clippy::too_many_arguments)]
+pub async fn create_event(
+    access_token: &str,
+    calendar_id: &str,
+    patient_full_name: Option<&str>,
+    modality: Option<&str>,
+    starts_at: &str,
+    ends_at: &str,
+) -> Result<String, GoogleApiError> {
     let http = reqwest::Client::new();
     let response = http
         .post(events_url(calendar_id))
         .bearer_auth(access_token)
-        .json(&event_payload(starts_at, ends_at))
+        .json(&event_payload(patient_full_name, modality, starts_at, ends_at))
         .send()
         .await?;
     let response = check_status(response).await?;
@@ -211,10 +255,13 @@ pub async fn create_event(access_token: &str, calendar_id: &str, starts_at: &str
     Ok(parsed.id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_event(
     access_token: &str,
     calendar_id: &str,
     event_id: &str,
+    patient_full_name: Option<&str>,
+    modality: Option<&str>,
     starts_at: &str,
     ends_at: &str,
 ) -> Result<(), GoogleApiError> {
@@ -222,7 +269,7 @@ pub async fn update_event(
     let response = http
         .patch(event_url(calendar_id, event_id))
         .bearer_auth(access_token)
-        .json(&event_payload(starts_at, ends_at))
+        .json(&event_payload(patient_full_name, modality, starts_at, ends_at))
         .send()
         .await?;
     check_status(response).await?;
@@ -261,24 +308,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_payload_never_contains_anything_beyond_the_generic_summary_and_the_two_timestamps() {
-        let payload = event_payload("2026-09-01T15:00:00Z", "2026-09-01T16:00:00Z");
+    fn event_payload_only_ever_has_summary_start_and_end() {
+        let payload = event_payload(Some("Rossina Pérez Soto"), Some("online"), "2026-09-01T15:00:00Z", "2026-09-01T16:00:00Z");
         let obj = payload.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
         keys.sort();
         assert_eq!(keys, vec!["end", "start", "summary"]);
-        assert_eq!(payload["summary"], "Sesión clínica");
+        assert_eq!(payload["summary"], "💻 Sesión Rossina");
         assert_eq!(payload["start"]["dateTime"], "2026-09-01T15:00:00Z");
         assert_eq!(payload["end"]["dateTime"], "2026-09-01T16:00:00Z");
     }
 
     #[test]
-    fn event_payload_is_identical_regardless_of_what_the_timestamps_look_like() {
+    fn event_payload_shape_is_identical_regardless_of_what_the_timestamps_look_like() {
         // No hay ninguna rama de código en `event_payload` que dependa de
-        // nada más que start/end — este test documenta esa garantía
-        // estructural: no existe ningún parámetro por el que un nombre de
-        // paciente, modalidad o motivo de consulta pudiera colarse.
-        let payload = event_payload("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
+        // nada más que start/end/nombre/modalidad — este test documenta esa
+        // garantía estructural: no existe ningún parámetro por el que
+        // diagnóstico, RUT o motivo de consulta pudieran colarse.
+        let payload = event_payload(None, None, "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
         assert_eq!(payload.as_object().unwrap().len(), 3);
     }
 
@@ -288,5 +335,49 @@ mod tests {
             events_url("mi.correo+tag@gmail.com"),
             "https://www.googleapis.com/calendar/v3/calendars/mi.correo%2Btag%40gmail.com/events"
         );
+    }
+
+    // --- build_event_summary: título del evento según modalidad + primer nombre ---
+
+    #[test]
+    fn online_with_full_name_uses_the_computer_emoji_and_only_the_first_name() {
+        assert_eq!(build_event_summary(Some("Rossina Pérez Soto"), Some("online")), "💻 Sesión Rossina");
+    }
+
+    #[test]
+    fn presencial_with_full_name_uses_the_handshake_emoji_and_only_the_first_name() {
+        assert_eq!(build_event_summary(Some("Macarena González"), Some("presencial")), "🤝 Sesión Macarena");
+    }
+
+    #[test]
+    fn extra_and_repeated_whitespace_in_the_name_still_yields_only_the_first_token() {
+        assert_eq!(build_event_summary(Some("   Rossina   Pérez   Soto  "), Some("online")), "💻 Sesión Rossina");
+    }
+
+    #[test]
+    fn a_blank_or_missing_name_falls_back_to_the_neutral_title_with_the_right_emoji() {
+        assert_eq!(build_event_summary(None, Some("online")), "💻 Sesión");
+        assert_eq!(build_event_summary(Some(""), Some("online")), "💻 Sesión");
+        assert_eq!(build_event_summary(Some("   "), Some("presencial")), "🤝 Sesión");
+        assert_eq!(build_event_summary(None, Some("presencial")), "🤝 Sesión");
+    }
+
+    #[test]
+    fn the_summary_never_contains_the_surname_or_any_other_clinical_field() {
+        let summary = build_event_summary(Some("Rossina Pérez Soto"), Some("online"));
+        assert!(!summary.contains("Pérez"));
+        assert!(!summary.contains("Soto"));
+        // Tampoco escribe la modalidad como texto — solo el emoji la representa.
+        assert!(!summary.to_lowercase().contains("online"));
+        assert!(!summary.to_lowercase().contains("presencial"));
+    }
+
+    #[test]
+    fn a_modality_outside_online_and_presencial_gets_no_emoji_but_still_only_the_first_name() {
+        // `telefonico` (y la ausencia de modalidad) están fuera del alcance
+        // de este pedido — se documenta el fallback elegido: sin emoji,
+        // mismo criterio de primer nombre.
+        assert_eq!(build_event_summary(Some("Rossina Pérez Soto"), Some("telefonico")), "Sesión Rossina");
+        assert_eq!(build_event_summary(Some("Rossina Pérez Soto"), None), "Sesión Rossina");
     }
 }

@@ -178,6 +178,33 @@ fn now_iso8601() -> String {
     format!("{y:04}-{m_:02}-{d:02}T{h:02}:{m:02}:{s:02}.{millis:03}Z")
 }
 
+/// Qué operación de Google Calendar corresponde a una cita, decidido sin
+/// tocar la red.
+enum SyncAction {
+    Create,
+    Update { event_id: String },
+    Delete { event_id: String },
+    NoOp,
+}
+
+/// Paso intermedio de [`reconcile`], extraído como función pura y
+/// directamente testeable: decide qué operación toca, dependiendo
+/// únicamente de si la cita debería tener evento (no archivada, no
+/// cancelada) y de si ya existe un `google_event_id` — **nunca** de la
+/// modalidad, el nombre del paciente ni ningún otro campo. Por eso un
+/// cambio de modalidad (o de nombre) en una cita que ya tiene
+/// `google_event_id` siempre resuelve a `Update` con ese mismo id: jamás
+/// crea un evento duplicado.
+fn decide_sync_action(appointment: &Appointment) -> SyncAction {
+    let should_have_event = appointment.deleted_at.is_none() && appointment.status != "cancelada";
+    match (should_have_event, &appointment.google_event_id) {
+        (true, None) => SyncAction::Create,
+        (true, Some(event_id)) => SyncAction::Update { event_id: event_id.clone() },
+        (false, None) => SyncAction::NoOp,
+        (false, Some(event_id)) => SyncAction::Delete { event_id: event_id.clone() },
+    }
+}
+
 /// Paso 2: asíncrono, **sin** `&Connection` — solo habla con Google a partir
 /// de lo que ya se leyó en el paso 1.
 pub async fn reconcile(input: ReconcileInput) -> ReconcileResult {
@@ -194,64 +221,74 @@ pub async fn reconcile(input: ReconcileInput) -> ReconcileResult {
         }
     };
 
-    let should_have_event = appointment.deleted_at.is_none() && appointment.status != "cancelada";
-
-    if should_have_event {
-        match &appointment.google_event_id {
-            None => match client::create_event(&access_token, &calendar_id, &appointment.starts_at, &appointment.ends_at).await {
-                Ok(event_id) => ReconcileResult {
-                    outcome: SyncOutcome::Synced,
-                    effect: ReconcileEffect::SetLink {
-                        event_id: Some(event_id),
-                        calendar_id: Some(calendar_id),
-                        synced_at: Some(now_iso8601()),
-                    },
+    match decide_sync_action(&appointment) {
+        SyncAction::Create => match client::create_event(
+            &access_token,
+            &calendar_id,
+            appointment.patient_name.as_deref(),
+            appointment.modality.as_deref(),
+            &appointment.starts_at,
+            &appointment.ends_at,
+        )
+        .await
+        {
+            Ok(event_id) => ReconcileResult {
+                outcome: SyncOutcome::Synced,
+                effect: ReconcileEffect::SetLink {
+                    event_id: Some(event_id),
+                    calendar_id: Some(calendar_id),
+                    synced_at: Some(now_iso8601()),
                 },
-                Err(e) => ReconcileResult { outcome: SyncOutcome::Failed { message: e.to_string() }, effect: ReconcileEffect::None },
             },
-            Some(event_id) => {
-                match client::update_event(&access_token, &calendar_id, event_id, &appointment.starts_at, &appointment.ends_at).await {
-                    Ok(()) => ReconcileResult {
-                        outcome: SyncOutcome::Synced,
-                        effect: ReconcileEffect::SetLink {
-                            event_id: Some(event_id.clone()),
-                            calendar_id: Some(calendar_id),
-                            synced_at: Some(now_iso8601()),
-                        },
-                    },
-                    // El evento desapareció directamente en Google: se
-                    // limpia el vínculo técnico, pero la cita local no se
-                    // toca — puede volver a sincronizarse manualmente. Se
-                    // conserva `last_synced_at` como señal de "estuvo
-                    // vinculada, ya no" para la UI.
-                    Err(GoogleApiError::ApiError { status: 404 | 410, .. }) => ReconcileResult {
-                        outcome: SyncOutcome::Failed {
-                            message: "el evento ya no existe en Google — vínculo limpiado, puedes volver a sincronizar".to_string(),
-                        },
-                        effect: ReconcileEffect::SetLink {
-                            event_id: None,
-                            calendar_id: None,
-                            synced_at: appointment.last_synced_at.clone(),
-                        },
-                    },
-                    Err(e) => ReconcileResult { outcome: SyncOutcome::Failed { message: e.to_string() }, effect: ReconcileEffect::None },
-                }
-            }
-        }
-    } else {
-        match &appointment.google_event_id {
-            None => ReconcileResult { outcome: SyncOutcome::Skipped, effect: ReconcileEffect::None },
-            Some(event_id) => match client::delete_event(&access_token, &calendar_id, event_id).await {
-                Ok(()) => ReconcileResult {
-                    outcome: SyncOutcome::Synced,
-                    effect: ReconcileEffect::SetLink { event_id: None, calendar_id: None, synced_at: None },
+            Err(e) => ReconcileResult { outcome: SyncOutcome::Failed { message: e.to_string() }, effect: ReconcileEffect::None },
+        },
+        SyncAction::Update { event_id } => match client::update_event(
+            &access_token,
+            &calendar_id,
+            &event_id,
+            appointment.patient_name.as_deref(),
+            appointment.modality.as_deref(),
+            &appointment.starts_at,
+            &appointment.ends_at,
+        )
+        .await
+        {
+            Ok(()) => ReconcileResult {
+                outcome: SyncOutcome::Synced,
+                effect: ReconcileEffect::SetLink {
+                    event_id: Some(event_id),
+                    calendar_id: Some(calendar_id),
+                    synced_at: Some(now_iso8601()),
                 },
-                // Si Google falla al borrar, se deja el vínculo intacto a
-                // propósito — el reintento manual necesita el mismo
-                // `google_event_id` para volver a intentar el borrado.
-                Err(e) => ReconcileResult { outcome: SyncOutcome::Failed { message: e.to_string() }, effect: ReconcileEffect::None },
             },
-        }
+            // El evento desapareció directamente en Google: se
+            // limpia el vínculo técnico, pero la cita local no se
+            // toca — puede volver a sincronizarse manualmente. Se
+            // conserva `last_synced_at` como señal de "estuvo
+            // vinculada, ya no" para la UI.
+            Err(GoogleApiError::ApiError { status: 404 | 410, .. }) => ReconcileResult {
+                outcome: SyncOutcome::Failed {
+                    message: "el evento ya no existe en Google — vínculo limpiado, puedes volver a sincronizar".to_string(),
+                },
+                effect: ReconcileEffect::SetLink {
+                    event_id: None,
+                    calendar_id: None,
+                    synced_at: appointment.last_synced_at.clone(),
+                },
+            },
+            Err(e) => ReconcileResult { outcome: SyncOutcome::Failed { message: e.to_string() }, effect: ReconcileEffect::None },
+        },
+        SyncAction::NoOp => ReconcileResult { outcome: SyncOutcome::Skipped, effect: ReconcileEffect::None },
+        SyncAction::Delete { event_id } => match client::delete_event(&access_token, &calendar_id, &event_id).await {
+            Ok(()) => ReconcileResult {
+                outcome: SyncOutcome::Synced,
+                effect: ReconcileEffect::SetLink { event_id: None, calendar_id: None, synced_at: None },
+            },
+            // Si Google falla al borrar, se deja el vínculo intacto a
+            // propósito — el reintento manual necesita el mismo
+            // `google_event_id` para volver a intentar el borrado.
+            Err(e) => ReconcileResult { outcome: SyncOutcome::Failed { message: e.to_string() }, effect: ReconcileEffect::None },
+        },
     }
 }
 
@@ -402,5 +439,66 @@ mod tests {
 
         let appointment = appointments::find_by_id(&conn, &id).unwrap().unwrap();
         assert!(appointment.google_event_id.is_none());
+    }
+
+    // --- decide_sync_action: qué operación toca, nunca depende de modalidad/nombre ---
+
+    fn sample_appointment(google_event_id: Option<&str>, modality: Option<&str>) -> Appointment {
+        Appointment {
+            id: "appt-1".to_string(),
+            patient_id: None,
+            patient_name: Some("Rossina Pérez Soto".to_string()),
+            starts_at: "2026-09-01T15:00:00Z".to_string(),
+            ends_at: "2026-09-01T16:00:00Z".to_string(),
+            status: "programada".to_string(),
+            modality: modality.map(|m| m.to_string()),
+            google_event_id: google_event_id.map(|e| e.to_string()),
+            google_calendar_id: None,
+            last_synced_at: None,
+            created_at: "2026-09-01T10:00:00.000Z".to_string(),
+            updated_at: "2026-09-01T10:00:00.000Z".to_string(),
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn decide_sync_action_creates_when_there_is_no_event_id_yet() {
+        let appointment = sample_appointment(None, Some("online"));
+        assert!(matches!(decide_sync_action(&appointment), SyncAction::Create));
+    }
+
+    /// Regresión directa del requisito "al cambiar modalidad, se actualiza
+    /// el título del evento existente, no se crea otro": una cita que ya
+    /// tiene `google_event_id` sigue resolviendo a `Update` con ese mismo
+    /// id sin importar qué modalidad tenga en ese momento — la decisión
+    /// entre crear y actualizar nunca lee `modality`.
+    #[test]
+    fn decide_sync_action_updates_the_same_event_regardless_of_modality_changes() {
+        let online = sample_appointment(Some("evt-existing"), Some("online"));
+        let presencial = sample_appointment(Some("evt-existing"), Some("presencial"));
+
+        for appointment in [online, presencial] {
+            match decide_sync_action(&appointment) {
+                SyncAction::Update { event_id } => assert_eq!(event_id, "evt-existing"),
+                _ => panic!("se esperaba Update — nunca Create, para una cita que ya tiene google_event_id"),
+            }
+        }
+    }
+
+    #[test]
+    fn decide_sync_action_deletes_when_cancelled_with_an_existing_event() {
+        let mut appointment = sample_appointment(Some("evt-1"), Some("presencial"));
+        appointment.status = "cancelada".to_string();
+        match decide_sync_action(&appointment) {
+            SyncAction::Delete { event_id } => assert_eq!(event_id, "evt-1"),
+            _ => panic!("se esperaba Delete"),
+        }
+    }
+
+    #[test]
+    fn decide_sync_action_is_a_noop_when_cancelled_and_never_synced() {
+        let mut appointment = sample_appointment(None, Some("online"));
+        appointment.status = "cancelada".to_string();
+        assert!(matches!(decide_sync_action(&appointment), SyncAction::NoOp));
     }
 }
