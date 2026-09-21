@@ -34,7 +34,9 @@ o no paciente) — nunca se expone por IPC ni se envía a Google. Las lecturas d
 ```
 calendar/
   oauth.rs    PKCE + state, listener de loopback, construcción de la URL de autorización
-  client.rs   Llamadas HTTP a Google (tokens, calendarList, eventos) — sin acceso a datos clínicos
+  client.rs   Llamadas HTTP a Google (tokens, calendarList, eventos) — sin acceso a diagnóstico,
+              notas, RUT ni ningún otro dato clínico; solo el primer nombre del paciente y la
+              modalidad, reducidos al título mínimo del evento antes de salir hacia Google
   tokens.rs   Refresh token en el keychain del SO (crate `keyring`)
   sync.rs     Orquestación local ↔ Google (prepare → reconcile → apply)
 ```
@@ -114,20 +116,32 @@ calendario ya existente.
 
 ## Minimización — qué llega a Google y qué nunca llega
 
-`calendar::client::event_payload(starts_at, ends_at)` es el único punto donde se construye el
-cuerpo JSON de un evento. Recibe **exclusivamente** dos horarios — nunca un `Appointment`
-completo — así es estructuralmente imposible que un campo clínico se cuele aunque `Appointment`
-gane campos nuevos en el futuro. El texto del evento es una constante fija dentro del módulo
-(`"Sesión clínica"`), no un parámetro:
+`calendar::client::event_payload(patient_full_name, modality, starts_at, ends_at)` es el único
+punto donde se construye el cuerpo JSON de un evento. Recibe el nombre completo del paciente y la
+modalidad, pero los reduce de inmediato — antes de construir el JSON — vía
+`calendar::client::build_event_summary`, la única función que toca esos dos datos:
 
 ```json
-{ "summary": "Sesión clínica", "start": { "dateTime": "…" }, "end": { "dateTime": "…" } }
+{ "summary": "💻 Sesión Rossina", "start": { "dateTime": "…" }, "end": { "dateTime": "…" } }
 ```
 
-Nunca se envía: nombre ni iniciales del paciente, RUT, diagnóstico, motivo de consulta,
-modalidad, notas, evaluaciones, formulación, ni ningún documento. Cubierto por
-`calendar::client::tests::event_payload_never_contains_anything_beyond_the_generic_summary_and_the_two_timestamps`
-y `event_payload_is_identical_regardless_of_what_the_timestamps_look_like`.
+`build_event_summary(patient_full_name, modality)`:
+- Antepone un emoji según la modalidad: `💻 ` para `online`, `🤝 ` para `presencial`, ninguno para
+  cualquier otro valor (`telefonico`, sin modalidad) — la modalidad nunca se escribe como texto.
+- Agrega el **primer nombre** del paciente si existe uno utilizable (`split_whitespace().next()` —
+  estructuralmente no puede emitir más que el primer token, sin importar qué nombre completo
+  reciba). Sin nombre utilizable (cita sin paciente, o nombre vacío/en blanco), cae al fallback
+  neutro `"💻 Sesión"` / `"🤝 Sesión"` / `"Sesión"`.
+
+Nunca se envía: apellido, RUT, diagnóstico, motivo de consulta, notas, evaluaciones, formulación,
+ni ningún documento — ni la modalidad como texto (solo el emoji). `event_payload` no recibe nunca
+un `Appointment` completo, así es estructuralmente imposible que un campo clínico nuevo se cuele
+aunque `Appointment` gane campos en el futuro. Cubierto por los tests de
+`calendar::client::tests` (título según modalidad, primer nombre con espacios extra, fallback sin
+nombre, ausencia de apellido) y por
+`calendar::sync::tests::decide_sync_action_updates_the_same_event_regardless_of_modality_changes`,
+que fija que un cambio de modalidad en una cita ya sincronizada siempre actualiza el mismo evento
+— la decisión entre crear/actualizar nunca lee `modality` ni `patient_name`.
 
 La advertencia de solapamiento (`services::appointments::OverlapWarning`) tampoco revela el
 paciente de la cita en conflicto — solo horario y si tiene o no paciente asociado — cubierto por

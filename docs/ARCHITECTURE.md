@@ -615,10 +615,12 @@ arquitectura.
   el endpoint de Google desde Rust (`reqwest`). Sin servidor externo propio.
 - **Almacenamiento de tokens**: `access_token`/`refresh_token` van al keychain del SO (crate
   `keyring`), nunca a la base SQLite ni a archivo plano.
-- **Qué se envía a Google**: únicamente un título genérico fijo ("Sesión clínica"), hora de
-  inicio/fin. La sanitización ocurre en el servicio `calendar_sync` de Rust en el momento del
-  push; el título rico y real vive solo en `appointments.title` localmente. Nunca se envían
-  nombre, RUT, diagnóstico, motivo de consulta, notas ni evaluaciones.
+- **Qué se envía a Google**: un título construido según modalidad ("💻 Sesión [primer nombre]"
+  para online, "🤝 Sesión [primer nombre]" para presencial, sin emoji para cualquier otra
+  modalidad), más hora de inicio/fin. La reducción a "solo el primer nombre" ocurre en
+  `calendar::client::build_event_summary` en el momento del push — nunca se envían apellido, RUT,
+  diagnóstico, motivo de consulta, notas ni evaluaciones. Ver `docs/google-calendar.md` sección
+  "Minimización".
 - **Sincronización**: recomendada **unidireccional (app → Google)** para el MVP de Fase 3 —
   Google Calendar actúa como espejo de solo lectura de la agenda profesional, visible desde el
   celular. Sincronización bidireccional es una decisión de alcance mayor pendiente de confirmar.
