@@ -151,8 +151,9 @@ export function SettingsScreen() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Google Calendar</h2>
           <p className="mt-1 text-sm font-medium text-foreground">{status?.connected ? 'Conectado' : 'No conectado'}</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Las citas creadas en Cuaderno Clínico pueden reflejarse en Google Calendar. Solo se sincroniza el
-            horario; nunca el nombre del paciente, diagnóstico ni otra información clínica.
+            Las citas sincronizadas con Google Calendar incluyen el primer nombre del paciente y la modalidad
+            de atención. No se sincronizan apellidos, diagnósticos, notas clínicas ni otra información de la
+            ficha.
           </p>
         </div>
 
